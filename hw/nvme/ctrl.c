@@ -1378,42 +1378,29 @@ static uint16_t nvme_tx(NvmeCtrl *n, NvmeSg *sg, void *ptr, uint32_t len,
 
     if (sg->flags & NVME_SG_DMA) {
         const MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
-        dma_addr_t residual;
 
         if (dir == NVME_TX_DIRECTION_TO_DEVICE) {
-            dma_buf_write(ptr, len, &residual, &sg->qsg, attrs);
+            dma_buf_write(ptr, len, NULL, &sg->qsg, attrs);
         } else {
-            dma_buf_read(ptr, len, &residual, &sg->qsg, attrs);
-        }
-
-        if (unlikely(residual)) {
-            trace_pci_nvme_err_invalid_dma();
-            return NVME_INVALID_FIELD | NVME_DNR;
+            dma_buf_read(ptr, len, NULL, &sg->qsg, attrs);
         }
     } else {
-        size_t bytes;
-
         if (dir == NVME_TX_DIRECTION_TO_DEVICE) {
-            bytes = qemu_iovec_to_buf(&sg->iov, 0, ptr, len);
+            qemu_iovec_to_buf(&sg->iov, 0, ptr, len);
         } else {
-            bytes = qemu_iovec_from_buf(&sg->iov, 0, ptr, len);
-        }
-
-        if (unlikely(bytes != len)) {
-            trace_pci_nvme_err_invalid_dma();
-            return NVME_INVALID_FIELD | NVME_DNR;
+            qemu_iovec_from_buf(&sg->iov, 0, ptr, len);
         }
     }
 
     return NVME_SUCCESS;
 }
 
-static inline uint16_t nvme_c2h(NvmeCtrl *n, void *ptr, uint32_t len,
-                                NvmeRequest *req)
+static inline uint16_t nvme_c2h(NvmeCtrl *n, void *ptr, size_t len,
+                                uint32_t hostlen, NvmeRequest *req)
 {
     uint16_t status;
 
-    status = nvme_map_dptr(n, &req->sg, len, &req->cmd);
+    status = nvme_map_dptr(n, &req->sg, hostlen, &req->cmd);
     if (status) {
         return status;
     }
@@ -4528,7 +4515,7 @@ static uint16_t nvme_zone_mgmt_recv(NvmeCtrl *n, NvmeRequest *req)
         }
     }
 
-    status = nvme_c2h(n, (uint8_t *)buf, data_size, req);
+    status = nvme_c2h(n, (uint8_t *)buf, data_size, data_size, req);
 
     g_free(buf);
 
@@ -4587,7 +4574,7 @@ static uint16_t nvme_io_mgmt_recv_ruhs(NvmeCtrl *n, NvmeRequest *req,
         }
     }
 
-    return nvme_c2h(n, buf, trans_len, req);
+    return nvme_c2h(n, buf, trans_len, len, req);
 }
 
 static uint16_t nvme_io_mgmt_recv(NvmeCtrl *n, NvmeRequest *req)
@@ -5079,7 +5066,7 @@ static uint16_t nvme_ocp_extended_smart_info(NvmeCtrl *n, uint8_t rae,
     }
 
     trans_len = MIN(sizeof(smart_l) - off, buf_len);
-    return nvme_c2h(n, (uint8_t *) &smart_l + off, trans_len, req);
+    return nvme_c2h(n, (uint8_t *) &smart_l + off, trans_len, buf_len, req);
 }
 
 static uint16_t nvme_smart_info(NvmeCtrl *n, uint8_t rae, uint32_t buf_len,
@@ -5141,7 +5128,7 @@ static uint16_t nvme_smart_info(NvmeCtrl *n, uint8_t rae, uint32_t buf_len,
         nvme_clear_events(n, NVME_AER_TYPE_SMART);
     }
 
-    return nvme_c2h(n, (uint8_t *) &smart + off, trans_len, req);
+    return nvme_c2h(n, (uint8_t *) &smart + off, trans_len, buf_len, req);
 }
 
 static uint16_t nvme_endgrp_info(NvmeCtrl *n,  uint8_t rae, uint32_t buf_len,
@@ -5151,6 +5138,7 @@ static uint16_t nvme_endgrp_info(NvmeCtrl *n,  uint8_t rae, uint32_t buf_len,
     uint16_t endgrpid = (dw11 >> 16) & 0xffff;
     struct nvme_stats stats = {};
     NvmeEndGrpLog info = {};
+    uint32_t trans_len;
     int i;
 
     if (!n->subsys || endgrpid != 0x1) {
@@ -5180,11 +5168,10 @@ static uint16_t nvme_endgrp_info(NvmeCtrl *n,  uint8_t rae, uint32_t buf_len,
     info.host_read_commands[0] = cpu_to_le64(stats.read_commands);
     info.host_write_commands[0] = cpu_to_le64(stats.write_commands);
 
-    buf_len = MIN(sizeof(info) - off, buf_len);
+    trans_len = MIN(sizeof(info) - off, buf_len);
 
-    return nvme_c2h(n, (uint8_t *)&info + off, buf_len, req);
+    return nvme_c2h(n, (uint8_t *)&info + off, trans_len, buf_len, req);
 }
-
 
 static uint16_t nvme_fw_log_info(NvmeCtrl *n, uint32_t buf_len, uint64_t off,
                                  NvmeRequest *req)
@@ -5201,7 +5188,7 @@ static uint16_t nvme_fw_log_info(NvmeCtrl *n, uint32_t buf_len, uint64_t off,
     strpadcpy((char *)&fw_log.frs1, sizeof(fw_log.frs1), "1.0", ' ');
     trans_len = MIN(sizeof(fw_log) - off, buf_len);
 
-    return nvme_c2h(n, (uint8_t *) &fw_log + off, trans_len, req);
+    return nvme_c2h(n, (uint8_t *) &fw_log + off, trans_len, buf_len, req);
 }
 
 static uint16_t nvme_error_info(NvmeCtrl *n, uint8_t rae, uint32_t buf_len,
@@ -5221,7 +5208,7 @@ static uint16_t nvme_error_info(NvmeCtrl *n, uint8_t rae, uint32_t buf_len,
     memset(&errlog, 0x0, sizeof(errlog));
     trans_len = MIN(sizeof(errlog) - off, buf_len);
 
-    return nvme_c2h(n, (uint8_t *)&errlog, trans_len, req);
+    return nvme_c2h(n, (uint8_t *)&errlog, trans_len, buf_len, req);
 }
 
 static uint16_t nvme_changed_nslist(NvmeCtrl *n, uint8_t rae, uint32_t buf_len,
@@ -5267,7 +5254,7 @@ static uint16_t nvme_changed_nslist(NvmeCtrl *n, uint8_t rae, uint32_t buf_len,
         nvme_clear_events(n, NVME_AER_TYPE_NOTICE);
     }
 
-    return nvme_c2h(n, ((uint8_t *)nslist) + off, trans_len, req);
+    return nvme_c2h(n, ((uint8_t *)nslist) + off, trans_len, buf_len, req);
 }
 
 static uint16_t nvme_cmd_effects(NvmeCtrl *n, uint8_t csi, uint32_t buf_len,
@@ -5308,7 +5295,7 @@ static uint16_t nvme_cmd_effects(NvmeCtrl *n, uint8_t csi, uint32_t buf_len,
 
     trans_len = MIN(sizeof(log) - off, buf_len);
 
-    return nvme_c2h(n, ((uint8_t *)&log) + off, trans_len, req);
+    return nvme_c2h(n, ((uint8_t *)&log) + off, trans_len, buf_len, req);
 }
 
 static uint16_t nvme_vendor_specific_log(NvmeCtrl *n, uint8_t rae,
@@ -5401,7 +5388,7 @@ static uint16_t nvme_fdp_confs(NvmeCtrl *n, uint32_t endgrpid, uint32_t buf_len,
         ruhd->ruht = NVME_RUHT_INITIALLY_ISOLATED;
     }
 
-    return nvme_c2h(n, (uint8_t *)buf + off, trans_len, req);
+    return nvme_c2h(n, (uint8_t *)buf + off, trans_len, buf_len, req);
 }
 
 static uint16_t nvme_fdp_ruh_usage(NvmeCtrl *n, uint32_t endgrpid,
@@ -5446,7 +5433,7 @@ static uint16_t nvme_fdp_ruh_usage(NvmeCtrl *n, uint32_t endgrpid,
         ruhud->ruha = ruh->ruha;
     }
 
-    return nvme_c2h(n, (uint8_t *)buf + off, trans_len, req);
+    return nvme_c2h(n, (uint8_t *)buf + off, trans_len, buf_len, req);
 }
 
 static uint16_t nvme_fdp_stats(NvmeCtrl *n, uint32_t endgrpid, uint32_t buf_len,
@@ -5477,7 +5464,7 @@ static uint16_t nvme_fdp_stats(NvmeCtrl *n, uint32_t endgrpid, uint32_t buf_len,
     log.mbmw[0] = cpu_to_le64(endgrp->fdp.mbmw);
     log.mbe[0] = cpu_to_le64(endgrp->fdp.mbe);
 
-    return nvme_c2h(n, (uint8_t *)&log + off, trans_len, req);
+    return nvme_c2h(n, (uint8_t *)&log + off, trans_len, buf_len, req);
 }
 
 static uint16_t nvme_fdp_events(NvmeCtrl *n, uint32_t endgrpid,
@@ -5531,7 +5518,7 @@ static uint16_t nvme_fdp_events(NvmeCtrl *n, uint32_t endgrpid,
                sizeof(NvmeFdpEvent) * (ebuf->next - ebuf->start));
     }
 
-    return nvme_c2h(n, (uint8_t *)elog + off, trans_len, req);
+    return nvme_c2h(n, (uint8_t *)elog + off, trans_len, buf_len, req);
 }
 
 static uint16_t nvme_get_log(NvmeCtrl *n, NvmeRequest *req)
@@ -5786,14 +5773,14 @@ static uint16_t nvme_rpt_empty_id_struct(NvmeCtrl *n, NvmeRequest *req)
 {
     uint8_t id[NVME_IDENTIFY_DATA_SIZE] = {};
 
-    return nvme_c2h(n, id, sizeof(id), req);
+    return nvme_c2h(n, id, sizeof(id), NVME_IDENTIFY_DATA_SIZE, req);
 }
 
 static uint16_t nvme_identify_ctrl(NvmeCtrl *n, NvmeRequest *req)
 {
     trace_pci_nvme_identify_ctrl();
 
-    return nvme_c2h(n, (uint8_t *)&n->id_ctrl, sizeof(n->id_ctrl), req);
+    return nvme_c2h(n, &n->id_ctrl, sizeof(NvmeIdCtrl), NVME_IDENTIFY_DATA_SIZE, req);
 }
 
 static uint16_t nvme_identify_ctrl_csi(NvmeCtrl *n, NvmeRequest *req)
@@ -5820,7 +5807,7 @@ static uint16_t nvme_identify_ctrl_csi(NvmeCtrl *n, NvmeRequest *req)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    return nvme_c2h(n, id, sizeof(id), req);
+    return nvme_c2h(n, id, sizeof(id), NVME_IDENTIFY_DATA_SIZE, req);
 }
 
 static uint16_t nvme_identify_ns(NvmeCtrl *n, NvmeRequest *req, bool active)
@@ -5848,7 +5835,8 @@ static uint16_t nvme_identify_ns(NvmeCtrl *n, NvmeRequest *req, bool active)
     }
 
     if (active || ns->csi == NVME_CSI_NVM) {
-        return nvme_c2h(n, (uint8_t *)&ns->id_ns, sizeof(NvmeIdNs), req);
+        return nvme_c2h(n, &ns->id_ns, sizeof(NvmeIdNs),
+                        NVME_IDENTIFY_DATA_SIZE, req);
     }
 
     return NVME_INVALID_IOCS | NVME_DNR;
@@ -5898,15 +5886,16 @@ static uint16_t nvme_identify_ctrl_list(NvmeCtrl *n, NvmeRequest *req,
 
     list[0] = nr_ids;
 
-    return nvme_c2h(n, (uint8_t *)list, sizeof(list), req);
+    return nvme_c2h(n, (uint8_t *)list, sizeof(list), NVME_IDENTIFY_DATA_SIZE,
+                    req);
 }
 
 static uint16_t nvme_identify_pri_ctrl_cap(NvmeCtrl *n, NvmeRequest *req)
 {
     trace_pci_nvme_identify_pri_ctrl_cap(le16_to_cpu(n->pri_ctrl_cap.cntlid));
 
-    return nvme_c2h(n, (uint8_t *)&n->pri_ctrl_cap,
-                    sizeof(NvmePriCtrlCap), req);
+    return nvme_c2h(n, (uint8_t *)&n->pri_ctrl_cap, sizeof(NvmePriCtrlCap),
+                    NVME_IDENTIFY_DATA_SIZE, req);
 }
 
 static uint16_t nvme_identify_sec_ctrl_list(NvmeCtrl *n, NvmeRequest *req)
@@ -5929,7 +5918,8 @@ static uint16_t nvme_identify_sec_ctrl_list(NvmeCtrl *n, NvmeRequest *req)
 
     trace_pci_nvme_identify_sec_ctrl_list(pri_ctrl_id, list.numcntl);
 
-    return nvme_c2h(n, (uint8_t *)&list, sizeof(list), req);
+    return nvme_c2h(n, (uint8_t *)&list, sizeof(list), NVME_IDENTIFY_DATA_SIZE,
+                    req);
 }
 
 static uint16_t nvme_identify_ns_ind(NvmeCtrl *n, NvmeRequest *req, bool alloc)
@@ -5956,7 +5946,8 @@ static uint16_t nvme_identify_ns_ind(NvmeCtrl *n, NvmeRequest *req, bool alloc)
         }
     }
 
-    return nvme_c2h(n, (uint8_t *)&ns->id_ns_ind, sizeof(NvmeIdNsInd), req);
+    return nvme_c2h(n, (uint8_t *)&ns->id_ns_ind, sizeof(NvmeIdNsInd),
+                    NVME_IDENTIFY_DATA_SIZE, req);
 }
 
 static uint16_t nvme_identify_ns_csi(NvmeCtrl *n, NvmeRequest *req,
@@ -5986,10 +5977,10 @@ static uint16_t nvme_identify_ns_csi(NvmeCtrl *n, NvmeRequest *req,
 
     if (c->csi == NVME_CSI_NVM) {
         return nvme_c2h(n, (uint8_t *)&ns->id_ns_nvm, sizeof(NvmeIdNsNvm),
-                        req);
+                        NVME_IDENTIFY_DATA_SIZE, req);
     } else if (c->csi == NVME_CSI_ZONED && ns->csi == NVME_CSI_ZONED) {
         return nvme_c2h(n, (uint8_t *)ns->id_ns_zoned, sizeof(NvmeIdNsZoned),
-                        req);
+                        NVME_IDENTIFY_DATA_SIZE, req);
     }
 
     return NVME_INVALID_FIELD | NVME_DNR;
@@ -6039,7 +6030,7 @@ static uint16_t nvme_identify_nslist(NvmeCtrl *n, NvmeRequest *req,
         }
     }
 
-    return nvme_c2h(n, list, data_len, req);
+    return nvme_c2h(n, list, data_len, NVME_IDENTIFY_DATA_SIZE, req);
 }
 
 static uint16_t nvme_identify_nslist_csi(NvmeCtrl *n, NvmeRequest *req,
@@ -6087,7 +6078,7 @@ static uint16_t nvme_identify_nslist_csi(NvmeCtrl *n, NvmeRequest *req,
         }
     }
 
-    return nvme_c2h(n, list, data_len, req);
+    return nvme_c2h(n, list, data_len, NVME_IDENTIFY_DATA_SIZE, req);
 }
 
 static uint16_t nvme_endurance_group_list(NvmeCtrl *n, NvmeRequest *req)
@@ -6107,7 +6098,7 @@ static uint16_t nvme_endurance_group_list(NvmeCtrl *n, NvmeRequest *req)
         *nr_ids = 0;
     }
 
-    return nvme_c2h(n, list, sizeof(list), req);
+    return nvme_c2h(n, list, sizeof(list), NVME_IDENTIFY_DATA_SIZE, req);
 }
 
 static uint16_t nvme_identify_ns_descr_list(NvmeCtrl *n, NvmeRequest *req)
@@ -6175,7 +6166,7 @@ static uint16_t nvme_identify_ns_descr_list(NvmeCtrl *n, NvmeRequest *req)
     memcpy(pos, &csi, sizeof(csi));
     pos += sizeof(csi);
 
-    return nvme_c2h(n, list, sizeof(list), req);
+    return nvme_c2h(n, list, sizeof(list), NVME_IDENTIFY_DATA_SIZE, req);
 }
 
 static uint16_t nvme_identify_cmd_set(NvmeCtrl *n, NvmeRequest *req)
@@ -6188,7 +6179,7 @@ static uint16_t nvme_identify_cmd_set(NvmeCtrl *n, NvmeRequest *req)
     NVME_SET_CSI(*list, NVME_CSI_NVM);
     NVME_SET_CSI(*list, NVME_CSI_ZONED);
 
-    return nvme_c2h(n, list, data_len, req);
+    return nvme_c2h(n, list, data_len, NVME_IDENTIFY_DATA_SIZE, req);
 }
 
 static uint16_t nvme_identify(NvmeCtrl *n, NvmeRequest *req)
@@ -6325,7 +6316,8 @@ static uint16_t nvme_get_feature_timestamp(NvmeCtrl *n, NvmeRequest *req)
 {
     uint64_t timestamp = nvme_get_timestamp(n);
 
-    return nvme_c2h(n, (uint8_t *)&timestamp, sizeof(timestamp), req);
+    return nvme_c2h(n, (uint8_t *)&timestamp, sizeof(timestamp),
+                    sizeof(timestamp), req);
 }
 
 static int nvme_get_feature_fdp(NvmeCtrl *n, uint32_t endgrpid,
@@ -6393,7 +6385,7 @@ static uint16_t nvme_get_feature_fdp_events(NvmeCtrl *n, NvmeNamespace *ns,
         }
     }
 
-    ret = nvme_c2h(n, s_events, s_events_siz, req);
+    ret = nvme_c2h(n, s_events, s_events_siz, s_events_siz, req);
     if (ret) {
         return ret;
     }
@@ -6511,7 +6503,7 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeRequest *req)
         return nvme_get_feature_timestamp(n, req);
     case NVME_HOST_BEHAVIOR_SUPPORT:
         return nvme_c2h(n, (uint8_t *)&n->features.hbs,
-                        sizeof(n->features.hbs), req);
+                        sizeof(n->features.hbs), sizeof(n->features.hbs), req);
     case NVME_FDP_MODE:
         endgrpid = dw11 & 0xff;
 
@@ -7614,7 +7606,7 @@ static uint16_t nvme_sec_prot_spdm_receive(NvmeCtrl *n, NvmeRequest *req)
         return NVME_DATA_TRAS_ERROR | NVME_DNR;
     }
 
-    ret = nvme_c2h(n, rsp_spdm_buf, MIN(recvd, alloc_len), req);
+    ret = nvme_c2h(n, rsp_spdm_buf, MIN(recvd, alloc_len), alloc_len, req);
     if (ret) {
         return ret;
     }
@@ -7642,7 +7634,7 @@ static uint16_t nvme_get_sec_prot_info(NvmeCtrl *n, NvmeRequest *req)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    return nvme_c2h(n, resp, sizeof(resp), req);
+    return nvme_c2h(n, resp, sizeof(resp), alloc_len, req);
 }
 
 /* From controller to host */
@@ -7691,6 +7683,7 @@ static uint16_t nvme_directive_receive(NvmeCtrl *n, NvmeRequest *req)
     uint32_t nsid = le32_to_cpu(req->cmd.nsid);
     uint8_t doper, dtype;
     uint32_t numd, trans_len;
+    size_t hostlen;
     NvmeDirectiveIdentify id = {
         .supported = 1 << NVME_DIRECTIVE_IDENTIFY,
         .enabled = 1 << NVME_DIRECTIVE_IDENTIFY,
@@ -7700,7 +7693,8 @@ static uint16_t nvme_directive_receive(NvmeCtrl *n, NvmeRequest *req)
     doper = dw11 & 0xff;
     dtype = (dw11 >> 8) & 0xff;
 
-    trans_len = MIN(sizeof(NvmeDirectiveIdentify), numd << 2);
+    hostlen = numd << 2;
+    trans_len = MIN(sizeof(NvmeDirectiveIdentify), hostlen);
 
     if (nsid == NVME_NSID_BROADCAST || dtype != NVME_DIRECTIVE_IDENTIFY ||
         doper != NVME_DIRECTIVE_RETURN_PARAMS) {
@@ -7722,7 +7716,7 @@ static uint16_t nvme_directive_receive(NvmeCtrl *n, NvmeRequest *req)
                 id.persistent |= 1 << NVME_DIRECTIVE_DATA_PLACEMENT;
             }
 
-            return nvme_c2h(n, (uint8_t *)&id, trans_len, req);
+            return nvme_c2h(n, (uint8_t *)&id, trans_len, hostlen, req);
 
         default:
             return NVME_INVALID_FIELD | NVME_DNR;

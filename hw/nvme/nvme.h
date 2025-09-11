@@ -756,8 +756,7 @@ uint16_t nvme_bounce_data(NvmeCtrl *n, void *ptr, uint32_t len,
 uint16_t nvme_bounce_mdata(NvmeCtrl *n, void *ptr, uint32_t len,
                            NvmeTxDirection dir, NvmeRequest *req);
 void nvme_rw_complete_cb(void *opaque, int ret);
-uint16_t nvme_map_dptr(NvmeCtrl *n, NvmeSg *sg, size_t len,
-                       NvmeCmd *cmd);
+uint16_t nvme_map_dptr(NvmeCtrl *n, NvmeSg *sg, size_t len, NvmeCmd *cmd);
 
 void nvme_atomic_configure_max_write_size(bool dn, uint16_t awun,
                                           uint16_t awupf, NvmeAtomic *atomic);
