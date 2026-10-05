@@ -22,8 +22,8 @@
 #include "system/block-backend.h"
 #include "migration/vmstate.h"
 
-#include "nvme.h"
-#include "trace.h"
+#include "hw/nvme/core/nvme.h"
+#include "hw/nvme/trace.h"
 
 #define MIN_DISCARD_GRANULARITY (4 * KiB)
 #define NVME_DEFAULT_ZONE_SIZE   (128 * MiB)

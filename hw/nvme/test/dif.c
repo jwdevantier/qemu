@@ -12,9 +12,9 @@
 #include "qapi/error.h"
 #include "system/block-backend.h"
 
-#include "nvme.h"
+#include "hw/nvme/core/nvme.h"
 #include "dif.h"
-#include "trace.h"
+#include "hw/nvme/trace.h"
 
 uint16_t nvme_check_prinfo(NvmeNamespace *ns, uint8_t prinfo, uint64_t slba,
                            uint64_t reftag)

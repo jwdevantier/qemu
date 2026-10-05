@@ -1,1 +1,8 @@
-system_ss.add(when: 'CONFIG_NVME_PCI', if_true: files('ctrl.c', 'dif.c', 'ns.c', 'subsys.c', 'nguid.c'))
+# Test (everything) device: -device nvme. NOT in the security boundary.
+system_ss.add(when: 'CONFIG_NVME_PCI', if_true: files(
+  'test/ctrl.c',
+  'test/dif.c',
+  'test/ns.c',
+  'test/subsys.c',
+  'test/nguid.c',
+))

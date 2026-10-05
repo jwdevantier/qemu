@@ -242,6 +242,14 @@ typedef struct NvmeAtomic {
     bool        atomic_writes;
 } NvmeAtomic;
 
+/*
+ * Device-defined NvmeRequest flag bits (NvmeRequest.flags):
+ * this device sets NVME_REQ_ATOMIC_WRITE on write commands that are
+ * part of an atomic write sequence and must not overlap other
+ * in-flight commands.
+ */
+#define NVME_REQ_ATOMIC_WRITE (1u << 0)
+
 typedef struct NvmeNamespace {
     DeviceState  parent_obj;
     BlockConf    blkconf;
@@ -449,7 +457,7 @@ typedef struct NvmeRequest {
     NvmeCmd                 cmd;
     BlockAcctCookie         acct;
     NvmeSg                  sg;
-    bool                    atomic_write;
+    unsigned                flags;  /* device-defined request flags */
     QTAILQ_ENTRY(NvmeRequest)entry;
     /*
      * If you add a new field here, please make sure to update

@@ -11,7 +11,7 @@
 #include "qapi/error.h"
 #include "hw/core/qdev.h"
 
-#include "nvme.h"
+#include "hw/nvme/core/nvme.h"
 
 #define NVME_DEFAULT_RU_SIZE (96 * MiB)
 

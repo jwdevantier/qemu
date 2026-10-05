@@ -214,9 +214,9 @@
 #include "migration/qemu-file-types.h"
 #include "migration/vmstate.h"
 
-#include "nvme.h"
+#include "hw/nvme/core/nvme.h"
 #include "dif.h"
-#include "trace.h"
+#include "hw/nvme/trace.h"
 
 #define NVME_MAX_IOQPAIRS 0xffff
 #define NVME_DB_SIZE  4
@@ -765,6 +765,7 @@ static void nvme_req_clear(NvmeRequest *req)
     req->aiocb = NULL;
     memset(&req->cqe, 0x0, sizeof(req->cqe));
     req->status = NVME_SUCCESS;
+    req->flags = 0;
 }
 
 static inline void nvme_sg_init(NvmeCtrl *n, NvmeSg *sg, bool dma)
@@ -8038,8 +8039,8 @@ static int nvme_atomic_write_check(NvmeCtrl *n, NvmeCmd *cmd,
                         return NVME_ATOMIC_NO_START;
                     }
                 } else {
-                    if (req->atomic_write && ((elba >= req_slba) &&
-                        (slba <= req_elba))) {
+                    if ((req->flags & NVME_REQ_ATOMIC_WRITE) &&
+                        ((elba >= req_slba) && (slba <= req_elba))) {
                         return NVME_ATOMIC_NO_START;
                     }
                 }
@@ -8124,8 +8125,8 @@ static void nvme_process_sq(void *opaque)
         req->cqe.cid = cmd.cid;
         memcpy(&req->cmd, &cmd, sizeof(NvmeCmd));
 
-        if (sq->sqid && atomic) {
-            req->atomic_write = cmd_is_atomic;
+        if (cmd_is_atomic) {
+            req->flags |= NVME_REQ_ATOMIC_WRITE;
         }
 
         status = sq->sqid ? nvme_io_cmd(n, req) :
@@ -10282,8 +10283,8 @@ static bool pre_save_validate_aer_req(NvmeRequest *req, Error **errp)
         return false;
     }
 
-    if (!(req->atomic_write == false)) {
-        error_setg(errp, "req->atomic_write != false");
+    if (req->flags) {
+        error_setg(errp, "req->flags != 0");
         return false;
     }
 
@@ -10312,8 +10313,8 @@ static bool pre_save_validate_cq_req(NvmeRequest *req, Error **errp)
         return false;
     }
 
-    if (!(req->atomic_write == false)) {
-        error_setg(errp, "req->atomic_write != false");
+    if (req->flags) {
+        error_setg(errp, "req->flags != 0");
         return false;
     }
 
