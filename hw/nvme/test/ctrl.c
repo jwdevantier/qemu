@@ -6486,12 +6486,14 @@ static bool nvme_atomic_boundary_check(NvmeCtrl *n, NvmeCmd *cmd,
     return true;
 }
 
-#define NVME_ATOMIC_NO_START        0
-#define NVME_ATOMIC_START_ATOMIC    1
-#define NVME_ATOMIC_START_NONATOMIC 2
+typedef enum NvmeAtomicControl {
+    NVME_ATOMIC_NO_START,
+    NVME_ATOMIC_START_ATOMIC,
+    NVME_ATOMIC_START_NONATOMIC,
+} NvmeAtomicControl;
 
-static int nvme_atomic_write_check(NvmeCtrl *n, NvmeCmd *cmd,
-    NvmeAtomic *atomic)
+static NvmeAtomicControl nvme_atomic_write_check(NvmeCtrl *n, NvmeCmd *cmd,
+                                                 NvmeAtomic *atomic)
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint64_t slba = le64_to_cpu(rw->slba);
@@ -6556,9 +6558,11 @@ static int nvme_atomic_write_check(NvmeCtrl *n, NvmeCmd *cmd,
             }
         }
     }
+
     if (cmd_atomic_wr) {
         return NVME_ATOMIC_START_ATOMIC;
     }
+
     return NVME_ATOMIC_START_NONATOMIC;
 }
 
