@@ -17,7 +17,7 @@
 #include "qemu/osdep.h"
 #include "qapi/visitor.h"
 #include "qemu/ctype.h"
-#include "hw/nvme/core/nvme.h"
+#include "hw/nvme/test/nvme.h"
 
 #define NGUID_SEPARATOR '-'
 

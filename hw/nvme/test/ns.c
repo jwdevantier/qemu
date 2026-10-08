@@ -22,7 +22,7 @@
 #include "system/block-backend.h"
 #include "migration/vmstate.h"
 
-#include "hw/nvme/core/nvme.h"
+#include "hw/nvme/test/nvme.h"
 #include "hw/nvme/trace.h"
 
 #define MIN_DISCARD_GRANULARITY (4 * KiB)
@@ -195,7 +195,7 @@ static void nvme_ns_resize_cb(void *opaque)
 
     notified_ctrls = 0;
     for (cntlid = 0; cntlid < ARRAY_SIZE(ns->subsys->ctrls); cntlid++) {
-        NvmeCtrl *ctrl;
+        NvmeCtrlBase *ctrl;
 
         /* notified everyone? */
         if (notified_ctrls == ns->attached) {
@@ -214,7 +214,7 @@ static void nvme_ns_resize_cb(void *opaque)
                 continue;
             }
 
-            nvme_ctrl_notify_ns_resize(ctrl, ns);
+            nvme_ctrl_notify_ns_resize(nvme_ctrl_of(ctrl), ns);
 
             notified_ctrls++;
             break;
@@ -815,7 +815,7 @@ void nvme_ns_atomic_configure_boundary(bool dn, uint16_t nabsn,
 static bool nvme_ns_set_nab(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     NvmeIdNs *id_ns = &ns->id_ns;
-    NvmeIdCtrl *id_ctrl = &n->id_ctrl;
+    NvmeIdCtrl *id_ctrl = &n->base.id_ctrl;
 
     uint16_t nabsn = ns->params.atomic.nabsn;
     uint16_t nabspf = ns->params.atomic.nabspf;
@@ -854,7 +854,7 @@ static bool nvme_ns_set_nab(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
 
     ns->atomic.atomic_nabo = nabo;
 
-    nvme_ns_atomic_configure_boundary(n->dn, nabsn, nabspf, &ns->atomic);
+    nvme_ns_atomic_configure_boundary(n->base.dn, nabsn, nabspf, &ns->atomic);
 
     return true;
 }
@@ -862,7 +862,7 @@ static bool nvme_ns_set_nab(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
 static bool nvme_ns_set_nsabp(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     NvmeIdNs *id_ns = &ns->id_ns;
-    NvmeIdCtrl *id_ctrl = &n->id_ctrl;
+    NvmeIdCtrl *id_ctrl = &n->base.id_ctrl;
 
     uint16_t awun = le16_to_cpu(id_ctrl->awun);
     uint16_t awupf = le16_to_cpu(id_ctrl->awupf);
@@ -899,7 +899,7 @@ static bool nvme_ns_set_nsabp(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
     id_ns->nawun = cpu_to_le16(nawun);
     id_ns->nawupf = cpu_to_le16(nawupf);
 
-    nvme_atomic_configure_max_write_size(n->dn, nawun, nawupf, &ns->atomic);
+    nvme_atomic_configure_max_write_size(n->base.dn, nawun, nawupf, &ns->atomic);
 
     return true;
 }
@@ -909,7 +909,7 @@ static void nvme_ns_realize(DeviceState *dev, Error **errp)
     NvmeNamespace *ns = NVME_NS(dev);
     BusState *s = qdev_get_parent_bus(dev);
     NvmeCtrl *n = NVME(s->parent);
-    NvmeSubsystem *subsys = n->subsys;
+    NvmeSubsystem *subsys = n->base.subsys;
     uint32_t nsid = ns->params.nsid;
     int i;
 
@@ -959,7 +959,7 @@ static void nvme_ns_realize(DeviceState *dev, Error **errp)
     ns->id_ns_ind.endgrpid = cpu_to_le16(0x1);
 
     if (!ns->params.shared) {
-        ns->ctrl = n;
+        ns->ctrl = &n->base;
 
         /*
          * Register the boot device path using the NVMe controller

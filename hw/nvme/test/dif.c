@@ -12,7 +12,7 @@
 #include "qapi/error.h"
 #include "system/block-backend.h"
 
-#include "hw/nvme/core/nvme.h"
+#include "hw/nvme/test/nvme.h"
 #include "dif.h"
 #include "hw/nvme/trace.h"
 
@@ -459,7 +459,7 @@ static void nvme_dif_rw_check_cb(void *opaque, int ret)
         goto out;
     }
 
-    status = nvme_bounce_data(n, ctx->data.bounce, ctx->data.iov.size,
+    status = nvme_bounce_data(&n->base, ctx->data.bounce, ctx->data.iov.size,
                               NVME_TX_DIRECTION_FROM_DEVICE, req);
     if (status) {
         req->status = status;
@@ -470,7 +470,7 @@ static void nvme_dif_rw_check_cb(void *opaque, int ret)
         goto out;
     }
 
-    status = nvme_bounce_mdata(n, ctx->mdata.bounce, ctx->mdata.iov.size,
+    status = nvme_bounce_mdata(&n->base, ctx->mdata.bounce, ctx->mdata.iov.size,
                                NVME_TX_DIRECTION_FROM_DEVICE, req);
     if (status) {
         req->status = status;
@@ -633,7 +633,7 @@ uint16_t nvme_dif_rw(NvmeCtrl *n, NvmeRequest *req)
         mapped_len += mlen;
     }
 
-    status = nvme_map_dptr(n, &req->sg, mapped_len, &req->cmd);
+    status = nvme_map_dptr(&n->base, &req->sg, mapped_len, &req->cmd);
     if (status) {
         goto err;
     }
@@ -652,7 +652,7 @@ uint16_t nvme_dif_rw(NvmeCtrl *n, NvmeRequest *req)
         return NVME_NO_COMPLETE;
     }
 
-    status = nvme_bounce_data(n, ctx->data.bounce, ctx->data.iov.size,
+    status = nvme_bounce_data(&n->base, ctx->data.bounce, ctx->data.iov.size,
                               NVME_TX_DIRECTION_TO_DEVICE, req);
     if (status) {
         goto err;
@@ -664,7 +664,7 @@ uint16_t nvme_dif_rw(NvmeCtrl *n, NvmeRequest *req)
     qemu_iovec_add(&ctx->mdata.iov, ctx->mdata.bounce, mlen);
 
     if (!(pract && ns->lbaf.ms == nvme_pi_tuple_size(ns))) {
-        status = nvme_bounce_mdata(n, ctx->mdata.bounce, ctx->mdata.iov.size,
+        status = nvme_bounce_mdata(&n->base, ctx->mdata.bounce, ctx->mdata.iov.size,
                                    NVME_TX_DIRECTION_TO_DEVICE, req);
         if (status) {
             goto err;

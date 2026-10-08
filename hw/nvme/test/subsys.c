@@ -11,11 +11,11 @@
 #include "qapi/error.h"
 #include "hw/core/qdev.h"
 
-#include "hw/nvme/core/nvme.h"
+#include "hw/nvme/test/nvme.h"
 
 #define NVME_DEFAULT_RU_SIZE (96 * MiB)
 
-static int nvme_subsys_reserve_cntlids(NvmeCtrl *n, int start, int num)
+static int nvme_subsys_reserve_cntlids(NvmeCtrlBase *n, int start, int num)
 {
     NvmeSubsystem *subsys = n->subsys;
     NvmeSecCtrlEntry *list = n->sec_ctrl_list;
@@ -34,7 +34,7 @@ static int nvme_subsys_reserve_cntlids(NvmeCtrl *n, int start, int num)
     return cnt;
 }
 
-static void nvme_subsys_unreserve_cntlids(NvmeCtrl *n)
+static void nvme_subsys_unreserve_cntlids(NvmeCtrlBase *n)
 {
     NvmeSubsystem *subsys = n->subsys;
     NvmeSecCtrlEntry *list = n->sec_ctrl_list;
@@ -53,10 +53,10 @@ static void nvme_subsys_unreserve_cntlids(NvmeCtrl *n)
     }
 }
 
-int nvme_subsys_register_ctrl(NvmeCtrl *n, Error **errp)
+int nvme_subsys_register_ctrl(NvmeCtrlBase *n, Error **errp)
 {
     NvmeSubsystem *subsys = n->subsys;
-    NvmeSecCtrlEntry *sctrl = nvme_sctrl(n);
+    NvmeSecCtrlEntry *sctrl = nvme_sctrl(nvme_ctrl_of(n));
     int cntlid, num_rsvd, num_vfs = n->params.sriov_max_vfs;
 
     if (pci_is_vf(&n->parent_obj)) {
@@ -96,7 +96,7 @@ int nvme_subsys_register_ctrl(NvmeCtrl *n, Error **errp)
     return cntlid;
 }
 
-void nvme_subsys_unregister_ctrl(NvmeSubsystem *subsys, NvmeCtrl *n)
+void nvme_subsys_unregister_ctrl(NvmeSubsystem *subsys, NvmeCtrlBase *n)
 {
     if (pci_is_vf(&n->parent_obj)) {
         subsys->ctrls[n->cntlid] = SUBSYS_SLOT_RSVD;

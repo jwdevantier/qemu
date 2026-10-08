@@ -26,7 +26,7 @@
 /* PRP mapping                                                         */
 /* ------------------------------------------------------------------ */
 
-static uint16_t nvme_map_prp(NvmeCtrl *n, NvmeSg *sg, uint64_t prp1,
+static uint16_t nvme_map_prp(NvmeCtrlBase *n, NvmeSg *sg, uint64_t prp1,
                              uint64_t prp2, uint32_t len)
 {
     hwaddr trans_len = n->page_size - (prp1 % n->page_size);
@@ -131,7 +131,7 @@ unmap:
  * Map 'nsgld' data descriptors from 'segment'. The function will subtract the
  * number of bytes mapped in len.
  */
-static uint16_t nvme_map_sgl_data(NvmeCtrl *n, NvmeSg *sg,
+static uint16_t nvme_map_sgl_data(NvmeCtrlBase *n, NvmeSg *sg,
                                   NvmeSglDescriptor *segment, uint64_t nsgld,
                                   size_t *len, NvmeCmd *cmd)
 {
@@ -187,7 +187,7 @@ static uint16_t nvme_map_sgl_data(NvmeCtrl *n, NvmeSg *sg,
     return NVME_SUCCESS;
 }
 
-uint16_t nvme_map_sgl(NvmeCtrl *n, NvmeSg *sg, NvmeSglDescriptor sgl,
+uint16_t nvme_map_sgl(NvmeCtrlBase *n, NvmeSg *sg, NvmeSglDescriptor sgl,
                      size_t len, NvmeCmd *cmd)
 {
 #define SEG_CHUNK_SIZE 256
@@ -305,7 +305,7 @@ unmap:
     return status;
 }
 
-uint16_t nvme_map_dptr(NvmeCtrl *n, NvmeSg *sg, size_t len, NvmeCmd *cmd)
+uint16_t nvme_map_dptr(NvmeCtrlBase *n, NvmeSg *sg, size_t len, NvmeCmd *cmd)
 {
     uint64_t prp1, prp2;
 

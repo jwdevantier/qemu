@@ -18,7 +18,7 @@
 #include "hw/nvme/core/nvme.h"
 #include "hw/nvme/trace.h"
 
-uint16_t nvme_tx(NvmeCtrl *n, NvmeSg *sg, void *ptr, uint32_t len,
+uint16_t nvme_tx(NvmeCtrlBase *n, NvmeSg *sg, void *ptr, uint32_t len,
                  NvmeTxDirection dir)
 {
     assert(sg->flags & NVME_SG_ALLOC);
@@ -42,7 +42,7 @@ uint16_t nvme_tx(NvmeCtrl *n, NvmeSg *sg, void *ptr, uint32_t len,
     return NVME_SUCCESS;
 }
 
-uint16_t nvme_c2h(NvmeCtrl *n, void *ptr, size_t len, uint32_t hostlen,
+uint16_t nvme_c2h(NvmeCtrlBase *n, void *ptr, size_t len, uint32_t hostlen,
                   NvmeRequest *req)
 {
     uint16_t status;
@@ -55,7 +55,7 @@ uint16_t nvme_c2h(NvmeCtrl *n, void *ptr, size_t len, uint32_t hostlen,
     return nvme_tx(n, &req->sg, ptr, len, NVME_TX_DIRECTION_FROM_DEVICE);
 }
 
-uint16_t nvme_h2c(NvmeCtrl *n, void *ptr, uint32_t len, NvmeRequest *req)
+uint16_t nvme_h2c(NvmeCtrlBase *n, void *ptr, uint32_t len, NvmeRequest *req)
 {
     uint16_t status;
 

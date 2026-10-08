@@ -49,7 +49,7 @@ QEMU_BUILD_BUG_ON(NVME_MAX_NAMESPACES > NVME_NSID_BROADCAST - 1);
             " in %s: " fmt "\n", __func__, ## __VA_ARGS__); \
     } while (0)
 
-typedef struct NvmeCtrl NvmeCtrl;
+typedef struct NvmeCtrlBase NvmeCtrlBase;
 typedef struct NvmeNamespace NvmeNamespace;
 
 #define TYPE_NVME_BUS "nvme-bus"
@@ -113,7 +113,7 @@ typedef struct NvmeSubsystem {
     uint8_t     subnqn[256];
     char        *serial;
 
-    NvmeCtrl           *ctrls[NVME_MAX_CONTROLLERS];
+    NvmeCtrlBase       *ctrls[NVME_MAX_CONTROLLERS];
     NvmeNamespace      *namespaces[NVME_MAX_NAMESPACES + 1];
     NvmeEnduranceGroup endgrp;
 
@@ -129,10 +129,10 @@ typedef struct NvmeSubsystem {
     } params;
 } NvmeSubsystem;
 
-int nvme_subsys_register_ctrl(NvmeCtrl *n, Error **errp);
-void nvme_subsys_unregister_ctrl(NvmeSubsystem *subsys, NvmeCtrl *n);
+int nvme_subsys_register_ctrl(NvmeCtrlBase *n, Error **errp);
+void nvme_subsys_unregister_ctrl(NvmeSubsystem *subsys, NvmeCtrlBase *n);
 
-static inline NvmeCtrl *nvme_subsys_ctrl(NvmeSubsystem *subsys,
+static inline NvmeCtrlBase *nvme_subsys_ctrl(NvmeSubsystem *subsys,
                                          uint32_t cntlid)
 {
     if (!subsys || cntlid >= NVME_MAX_CONTROLLERS) {
@@ -305,7 +305,7 @@ typedef struct NvmeNamespace {
     NvmeEnduranceGroup *endgrp;
 
     /* NULL for shared namespaces; set to specific controller if private */
-    NvmeCtrl *ctrl;
+    NvmeCtrlBase *ctrl;
 
     struct {
         uint32_t err_rec;
@@ -529,7 +529,7 @@ static inline const char *nvme_io_opc_str(uint8_t opc)
 }
 
 typedef struct NvmeSQueue {
-    struct NvmeCtrl *ctrl;
+    struct NvmeCtrlBase *ctrl;
     uint16_t    sqid;
     uint16_t    cqid;
     uint32_t    head;
@@ -547,7 +547,7 @@ typedef struct NvmeSQueue {
 } NvmeSQueue;
 
 typedef struct NvmeCQueue {
-    struct NvmeCtrl *ctrl;
+    struct NvmeCtrlBase *ctrl;
     uint8_t     phase;
     uint16_t    cqid;
     uint32_t    head;
@@ -562,10 +562,6 @@ typedef struct NvmeCQueue {
     QTAILQ_HEAD(, NvmeSQueue) sq_list;
     QTAILQ_HEAD(, NvmeRequest) req_list;
 } NvmeCQueue;
-
-#define TYPE_NVME "nvme"
-#define NVME(obj) \
-        OBJECT_CHECK(NvmeCtrl, (obj), TYPE_NVME)
 
 typedef struct NvmeParams {
     char     *serial;
@@ -608,7 +604,7 @@ typedef struct NvmeParams {
     bool     atomic_dn;
 } NvmeParams;
 
-typedef struct NvmeCtrl {
+typedef struct NvmeCtrlBase {
     PCIDevice    parent_obj;
     MemoryRegion bar0;
     MemoryRegion iomem;
@@ -708,14 +704,14 @@ typedef struct NvmeCtrl {
             int pending;
         } intx;
     } irq;
-} NvmeCtrl;
+} NvmeCtrlBase;
 
 typedef enum NvmeResetType {
     NVME_RESET_FUNCTION   = 0,
     NVME_RESET_CONTROLLER = 1,
 } NvmeResetType;
 
-static inline NvmeNamespace *nvme_ns(NvmeCtrl *n, uint32_t nsid)
+static inline NvmeNamespace *nvme_ns(NvmeCtrlBase *n, uint32_t nsid)
 {
     if (!nsid || nsid > NVME_MAX_NAMESPACES) {
         return NULL;
@@ -727,12 +723,11 @@ static inline NvmeNamespace *nvme_ns(NvmeCtrl *n, uint32_t nsid)
 static inline NvmeCQueue *nvme_cq(NvmeRequest *req)
 {
     NvmeSQueue *sq = req->sq;
-    NvmeCtrl *n = sq->ctrl;
 
-    return n->cq[sq->cqid];
+    return sq->ctrl->cq[sq->cqid];
 }
 
-static inline NvmeCtrl *nvme_ctrl(NvmeRequest *req)
+static inline NvmeCtrlBase *nvme_ctrl_base(NvmeRequest *req)
 {
     NvmeSQueue *sq = req->sq;
     return sq->ctrl;
@@ -747,40 +742,13 @@ static inline uint16_t nvme_cid(NvmeRequest *req)
     return le16_to_cpu(req->cqe.cid);
 }
 
-static inline NvmeSecCtrlEntry *nvme_sctrl(NvmeCtrl *n)
-{
-    PCIDevice *pci_dev = &n->parent_obj;
-    NvmeCtrl *pf = NVME(pcie_sriov_get_pf(pci_dev));
-
-    if (pci_is_vf(pci_dev)) {
-        return &pf->sec_ctrl_list[pcie_sriov_vf_number(pci_dev)];
-    }
-
-    return NULL;
-}
-
-static inline NvmeSecCtrlEntry *nvme_sctrl_for_cntlid(NvmeCtrl *n,
-                                                      uint16_t cntlid)
-{
-    NvmeSecCtrlEntry *list = n->sec_ctrl_list;
-    uint8_t i;
-
-    for (i = 0; i < n->nr_sec_ctrls; i++) {
-        if (le16_to_cpu(list[i].scid) == cntlid) {
-            return &list[i];
-        }
-    }
-
-    return NULL;
-}
-
-void nvme_attach_ns(NvmeCtrl *n, NvmeNamespace *ns);
-uint16_t nvme_bounce_data(NvmeCtrl *n, void *ptr, uint32_t len,
+void nvme_attach_ns(NvmeCtrlBase *n, NvmeNamespace *ns);
+uint16_t nvme_bounce_data(NvmeCtrlBase *n, void *ptr, uint32_t len,
                           NvmeTxDirection dir, NvmeRequest *req);
-uint16_t nvme_bounce_mdata(NvmeCtrl *n, void *ptr, uint32_t len,
+uint16_t nvme_bounce_mdata(NvmeCtrlBase *n, void *ptr, uint32_t len,
                            NvmeTxDirection dir, NvmeRequest *req);
 void nvme_rw_complete_cb(void *opaque, int ret);
-uint16_t nvme_map_dptr(NvmeCtrl *n, NvmeSg *sg, size_t len,
+uint16_t nvme_map_dptr(NvmeCtrlBase *n, NvmeSg *sg, size_t len,
                        NvmeCmd *cmd);
 
 void nvme_atomic_configure_max_write_size(bool dn, uint16_t awun,
@@ -788,14 +756,12 @@ void nvme_atomic_configure_max_write_size(bool dn, uint16_t awun,
 void nvme_ns_atomic_configure_boundary(bool dn, uint16_t nabsn,
                                        uint16_t nabspf, NvmeAtomic *atomic);
 
-void nvme_ctrl_notify_ns_resize(NvmeCtrl *ctrl, NvmeNamespace *ns);
-
 extern const VMStateDescription nvme_vmstate_atomic;
 extern const VMStateDescription nvme_vmstate_ns;
 
 /*
  * Inline helpers shared by core/ and test/. These are small, hot
- * functions that benefit from inlining and only reference NvmeCtrl fields
+ * functions that benefit from inlining and only reference NvmeCtrlBase fields
  * already defined in this header.
  */
 
@@ -809,7 +775,7 @@ static inline void nvme_req_clear(NvmeRequest *req)
     req->flags = 0;
 }
 
-static inline void nvme_sg_init(NvmeCtrl *n, NvmeSg *sg, bool dma)
+static inline void nvme_sg_init(NvmeCtrlBase *n, NvmeSg *sg, bool dma)
 {
     if (dma) {
         pci_dma_sglist_init(&sg->qsg, PCI_DEVICE(n), 0);
@@ -836,7 +802,7 @@ static inline void nvme_sg_unmap(NvmeSg *sg)
     memset(sg, 0x0, sizeof(*sg));
 }
 
-static inline bool nvme_addr_is_iomem(NvmeCtrl *n, hwaddr addr)
+static inline bool nvme_addr_is_iomem(NvmeCtrlBase *n, hwaddr addr)
 {
     hwaddr hi, lo;
 
@@ -853,23 +819,23 @@ static inline bool nvme_addr_is_iomem(NvmeCtrl *n, hwaddr addr)
  * through a QOM base class arrives with the production device ("move
  * device dispatch hooks to a QOM base class").
  */
-uint16_t nvme_map_addr(NvmeCtrl *n, NvmeSg *sg, hwaddr addr, size_t len);
-int nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size);
-int nvme_addr_write(NvmeCtrl *n, hwaddr addr, const void *buf, int size);
-bool nvme_is_dma_addr(NvmeCtrl *n, hwaddr addr);
+uint16_t nvme_map_addr(NvmeCtrlBase *n, NvmeSg *sg, hwaddr addr, size_t len);
+int nvme_addr_read(NvmeCtrlBase *n, hwaddr addr, void *buf, int size);
+int nvme_addr_write(NvmeCtrlBase *n, hwaddr addr, const void *buf, int size);
+bool nvme_is_dma_addr(NvmeCtrlBase *n, hwaddr addr);
 
 /*
  * Functions implemented in core/dptr.c and core/dma.c. Declared here so
  * the device models can call them.
  */
-uint16_t nvme_map_sgl(NvmeCtrl *n, NvmeSg *sg, NvmeSglDescriptor sgl,
+uint16_t nvme_map_sgl(NvmeCtrlBase *n, NvmeSg *sg, NvmeSglDescriptor sgl,
                       size_t len, NvmeCmd *cmd);
 
-uint16_t nvme_tx(NvmeCtrl *n, NvmeSg *sg, void *ptr, uint32_t len,
+uint16_t nvme_tx(NvmeCtrlBase *n, NvmeSg *sg, void *ptr, uint32_t len,
                  NvmeTxDirection dir);
-uint16_t nvme_c2h(NvmeCtrl *n, void *ptr, size_t len, uint32_t hostlen,
+uint16_t nvme_c2h(NvmeCtrlBase *n, void *ptr, size_t len, uint32_t hostlen,
                   NvmeRequest *req);
-uint16_t nvme_h2c(NvmeCtrl *n, void *ptr, uint32_t len, NvmeRequest *req);
+uint16_t nvme_h2c(NvmeCtrlBase *n, void *ptr, uint32_t len, NvmeRequest *req);
 
 void nvme_blk_read(BlockBackend *blk, int64_t offset, uint32_t align,
                    BlockCompletionFunc *cb, NvmeRequest *req);
