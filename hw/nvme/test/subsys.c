@@ -15,7 +15,7 @@
 
 #define NVME_DEFAULT_RU_SIZE (96 * MiB)
 
-static int nvme_subsys_reserve_cntlids(NvmeCtrlBase *n, int start, int num)
+static int nvme_subsys_reserve_cntlids(NvmeCtrl *n, int start, int num)
 {
     NvmeSubsystem *subsys = n->subsys;
     NvmeSecCtrlEntry *list = n->sec_ctrl_list;
@@ -34,14 +34,14 @@ static int nvme_subsys_reserve_cntlids(NvmeCtrlBase *n, int start, int num)
     return cnt;
 }
 
-static void nvme_subsys_unreserve_cntlids(NvmeCtrlBase *n)
+static void nvme_subsys_unreserve_cntlids(NvmeCtrl *n)
 {
     NvmeSubsystem *subsys = n->subsys;
     NvmeSecCtrlEntry *list = n->sec_ctrl_list;
     NvmeSecCtrlEntry *sctrl;
     int i, cntlid;
 
-    for (i = 0; i < n->params.sriov_max_vfs; i++) {
+    for (i = 0; i < n->base.params.sriov_max_vfs; i++) {
         sctrl = &list[i];
         cntlid = le16_to_cpu(sctrl->scid);
 
@@ -53,13 +53,13 @@ static void nvme_subsys_unreserve_cntlids(NvmeCtrlBase *n)
     }
 }
 
-int nvme_subsys_register_ctrl(NvmeCtrlBase *n, Error **errp)
+int nvme_subsys_register_ctrl(NvmeCtrl *n, Error **errp)
 {
     NvmeSubsystem *subsys = n->subsys;
-    NvmeSecCtrlEntry *sctrl = nvme_sctrl(nvme_ctrl_of(n));
-    int cntlid, num_rsvd, num_vfs = n->params.sriov_max_vfs;
+    NvmeSecCtrlEntry *sctrl = nvme_sctrl(n);
+    int cntlid, num_rsvd, num_vfs = n->base.params.sriov_max_vfs;
 
-    if (pci_is_vf(&n->parent_obj)) {
+    if (pci_is_vf(&n->base.parent_obj)) {
         cntlid = le16_to_cpu(sctrl->scid);
     } else {
         n->sec_ctrl_list = g_new0(NvmeSecCtrlEntry, num_vfs);
@@ -85,20 +85,20 @@ int nvme_subsys_register_ctrl(NvmeCtrlBase *n, Error **errp)
     }
 
     if (!subsys->serial) {
-        subsys->serial = g_strdup(n->params.serial);
-    } else if (strcmp(subsys->serial, n->params.serial)) {
+        subsys->serial = g_strdup(n->base.params.serial);
+    } else if (strcmp(subsys->serial, n->base.params.serial)) {
         error_setg(errp, "invalid controller serial");
         return -1;
     }
 
-    subsys->ctrls[cntlid] = n;
+    subsys->ctrls[cntlid] = &n->base;
 
     return cntlid;
 }
 
-void nvme_subsys_unregister_ctrl(NvmeSubsystem *subsys, NvmeCtrlBase *n)
+void nvme_subsys_unregister_ctrl(NvmeSubsystem *subsys, NvmeCtrl *n)
 {
-    if (pci_is_vf(&n->parent_obj)) {
+    if (pci_is_vf(&n->base.parent_obj)) {
         subsys->ctrls[n->cntlid] = SUBSYS_SLOT_RSVD;
     } else {
         subsys->ctrls[n->cntlid] = NULL;

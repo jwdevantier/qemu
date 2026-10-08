@@ -517,7 +517,7 @@ static bool nvme_update_ruh(NvmeCtrl *n, NvmeNamespace *ns, uint16_t pid)
 /* CMB/PMR address helpers (test-only, not in core/)                  */
 /* ------------------------------------------------------------------ */
 
-static bool nvme_addr_is_cmb(NvmeCtrlBase *n, hwaddr addr)
+static bool nvme_addr_is_cmb(NvmeCtrl *n, hwaddr addr)
 {
     hwaddr hi, lo;
 
@@ -525,19 +525,19 @@ static bool nvme_addr_is_cmb(NvmeCtrlBase *n, hwaddr addr)
         return false;
     }
 
-    lo = n->params.legacy_cmb ? n->cmb.mem.addr : n->cmb.cba;
+    lo = n->base.params.legacy_cmb ? n->cmb.mem.addr : n->cmb.cba;
     hi = lo + int128_get64(n->cmb.mem.size);
 
     return addr >= lo && addr < hi;
 }
 
-static inline void *nvme_addr_to_cmb(NvmeCtrlBase *n, hwaddr addr)
+static inline void *nvme_addr_to_cmb(NvmeCtrl *n, hwaddr addr)
 {
-    hwaddr base = n->params.legacy_cmb ? n->cmb.mem.addr : n->cmb.cba;
+    hwaddr base = n->base.params.legacy_cmb ? n->cmb.mem.addr : n->cmb.cba;
     return &n->cmb.buf[addr - base];
 }
 
-static bool nvme_addr_is_pmr(NvmeCtrlBase *n, hwaddr addr)
+static bool nvme_addr_is_pmr(NvmeCtrl *n, hwaddr addr)
 {
     hwaddr hi;
 
@@ -550,12 +550,12 @@ static bool nvme_addr_is_pmr(NvmeCtrlBase *n, hwaddr addr)
     return addr >= n->pmr.cba && addr < hi;
 }
 
-static inline void *nvme_addr_to_pmr(NvmeCtrlBase *n, hwaddr addr)
+static inline void *nvme_addr_to_pmr(NvmeCtrl *n, hwaddr addr)
 {
     return memory_region_get_ram_ptr(&n->pmr.dev->mr) + (addr - n->pmr.cba);
 }
 
-static uint16_t nvme_map_addr_cmb(NvmeCtrlBase *n, QEMUIOVector *iov, hwaddr addr,
+static uint16_t nvme_map_addr_cmb(NvmeCtrl *n, QEMUIOVector *iov, hwaddr addr,
                                   size_t len)
 {
     if (!len) {
@@ -573,7 +573,7 @@ static uint16_t nvme_map_addr_cmb(NvmeCtrlBase *n, QEMUIOVector *iov, hwaddr add
     return NVME_SUCCESS;
 }
 
-static uint16_t nvme_map_addr_pmr(NvmeCtrlBase *n, QEMUIOVector *iov, hwaddr addr,
+static uint16_t nvme_map_addr_pmr(NvmeCtrl *n, QEMUIOVector *iov, hwaddr addr,
                                   size_t len)
 {
     if (!len) {
@@ -598,6 +598,7 @@ static uint16_t nvme_map_addr_pmr(NvmeCtrlBase *n, QEMUIOVector *iov, hwaddr add
 uint16_t nvme_map_addr(NvmeCtrlBase *n, NvmeSg *sg, hwaddr addr,
                             size_t len)
 {
+    NvmeCtrl *t = nvme_ctrl_of(n);
     bool cmb = false, pmr = false;
 
     if (!len) {
@@ -610,9 +611,9 @@ uint16_t nvme_map_addr(NvmeCtrlBase *n, NvmeSg *sg, hwaddr addr,
         return NVME_DATA_TRAS_ERROR;
     }
 
-    if (nvme_addr_is_cmb(n, addr)) {
+    if (nvme_addr_is_cmb(t, addr)) {
         cmb = true;
-    } else if (nvme_addr_is_pmr(n, addr)) {
+    } else if (nvme_addr_is_pmr(t, addr)) {
         pmr = true;
     }
 
@@ -626,9 +627,9 @@ uint16_t nvme_map_addr(NvmeCtrlBase *n, NvmeSg *sg, hwaddr addr,
         }
 
         if (cmb) {
-            return nvme_map_addr_cmb(n, &sg->iov, addr, len);
+            return nvme_map_addr_cmb(t, &sg->iov, addr, len);
         } else {
-            return nvme_map_addr_pmr(n, &sg->iov, addr, len);
+            return nvme_map_addr_pmr(t, &sg->iov, addr, len);
         }
     }
 
@@ -689,18 +690,19 @@ static bool nvme_addr_is_mappable(NvmeCtrl *n, hwaddr addr, size_t len,
 
 int nvme_addr_read(NvmeCtrlBase *n, hwaddr addr, void *buf, int size)
 {
+    NvmeCtrl *t = nvme_ctrl_of(n);
     hwaddr hi = addr + size - 1;
     if (hi < addr) {
         return 1;
     }
 
-    if (n->bar.cmbsz && nvme_addr_is_cmb(n, addr) && nvme_addr_is_cmb(n, hi)) {
-        memcpy(buf, nvme_addr_to_cmb(n, addr), size);
+    if (n->bar.cmbsz && nvme_addr_is_cmb(t, addr) && nvme_addr_is_cmb(t, hi)) {
+        memcpy(buf, nvme_addr_to_cmb(t, addr), size);
         return 0;
     }
 
-    if (nvme_addr_is_pmr(n, addr) && nvme_addr_is_pmr(n, hi)) {
-        memcpy(buf, nvme_addr_to_pmr(n, addr), size);
+    if (nvme_addr_is_pmr(t, addr) && nvme_addr_is_pmr(t, hi)) {
+        memcpy(buf, nvme_addr_to_pmr(t, addr), size);
         return 0;
     }
 
@@ -710,18 +712,19 @@ int nvme_addr_read(NvmeCtrlBase *n, hwaddr addr, void *buf, int size)
 int nvme_addr_write(NvmeCtrlBase *n, hwaddr addr, const void *buf,
                                 int size)
 {
+    NvmeCtrl *t = nvme_ctrl_of(n);
     hwaddr hi = addr + size - 1;
     if (hi < addr) {
         return 1;
     }
 
-    if (n->bar.cmbsz && nvme_addr_is_cmb(n, addr) && nvme_addr_is_cmb(n, hi)) {
-        memcpy(nvme_addr_to_cmb(n, addr), buf, size);
+    if (n->bar.cmbsz && nvme_addr_is_cmb(t, addr) && nvme_addr_is_cmb(t, hi)) {
+        memcpy(nvme_addr_to_cmb(t, addr), buf, size);
         return 0;
     }
 
-    if (nvme_addr_is_pmr(n, addr) && nvme_addr_is_pmr(n, hi)) {
-        memcpy(nvme_addr_to_pmr(n, addr), buf, size);
+    if (nvme_addr_is_pmr(t, addr) && nvme_addr_is_pmr(t, hi)) {
+        memcpy(nvme_addr_to_pmr(t, addr), buf, size);
         return 0;
     }
 
@@ -730,7 +733,8 @@ int nvme_addr_write(NvmeCtrlBase *n, hwaddr addr, const void *buf,
 
 bool nvme_is_dma_addr(NvmeCtrlBase *n, hwaddr addr)
 {
-    return !(nvme_addr_is_cmb(n, addr) || nvme_addr_is_pmr(n, addr));
+    NvmeCtrl *t = nvme_ctrl_of(n);
+    return !(nvme_addr_is_cmb(t, addr) || nvme_addr_is_pmr(t, addr));
 }
 
 static bool nvme_nsid_valid(NvmeCtrl *n, uint32_t nsid)
@@ -1192,7 +1196,7 @@ static void nvme_process_aers(void *opaque)
     NvmeCtrl *n = opaque;
     NvmeAsyncEvent *event, *next;
 
-    trace_pci_nvme_process_aers(n->base.aer_queued);
+    trace_pci_nvme_process_aers(n->aer_queued);
 
     QTAILQ_FOREACH_SAFE(event, &n->base.aer_queue, entry, next) {
         NvmeRequest *req;
@@ -1205,15 +1209,15 @@ static void nvme_process_aers(void *opaque)
         }
 
         /* ignore if masked (cqe posted, but event not cleared) */
-        if (n->base.aer_mask & (1 << event->result.event_type)) {
-            trace_pci_nvme_aer_masked(event->result.event_type, n->base.aer_mask);
+        if (n->aer_mask & (1 << event->result.event_type)) {
+            trace_pci_nvme_aer_masked(event->result.event_type, n->aer_mask);
             continue;
         }
 
         QTAILQ_REMOVE(&n->base.aer_queue, event, entry);
-        n->base.aer_queued--;
+        n->aer_queued--;
 
-        n->base.aer_mask |= 1 << event->result.event_type;
+        n->aer_mask |= 1 << event->result.event_type;
         n->base.outstanding_aers--;
 
         req = n->base.aer_reqs[n->base.outstanding_aers];
@@ -1238,8 +1242,8 @@ static void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
 
     trace_pci_nvme_enqueue_event(event_type, event_info, log_page);
 
-    if (n->base.aer_queued == n->base.params.aer_max_queued) {
-        trace_pci_nvme_enqueue_event_noqueue(n->base.aer_queued);
+    if (n->aer_queued == n->base.params.aer_max_queued) {
+        trace_pci_nvme_enqueue_event_noqueue(n->aer_queued);
         return;
     }
 
@@ -1251,7 +1255,7 @@ static void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
     };
 
     QTAILQ_INSERT_TAIL(&n->base.aer_queue, event, entry);
-    n->base.aer_queued++;
+    n->aer_queued++;
 
     nvme_process_aers(n);
 }
@@ -1289,12 +1293,12 @@ static void nvme_clear_events(NvmeCtrl *n, uint8_t event_type)
 {
     NvmeAsyncEvent *event, *next;
 
-    n->base.aer_mask &= ~(1 << event_type);
+    n->aer_mask &= ~(1 << event_type);
 
     QTAILQ_FOREACH_SAFE(event, &n->base.aer_queue, entry, next) {
         if (event->result.event_type == event_type) {
             QTAILQ_REMOVE(&n->base.aer_queue, event, entry);
-            n->base.aer_queued--;
+            n->aer_queued--;
             g_free(event);
         }
     }
@@ -4134,7 +4138,7 @@ static uint16_t nvme_io_mgmt_recv_ruhs(NvmeCtrl *n, NvmeRequest *req,
     size_t trans_len;
     g_autofree uint8_t *buf = NULL;
 
-    if (!n->base.subsys) {
+    if (!n->subsys) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -4142,7 +4146,7 @@ static uint16_t nvme_io_mgmt_recv_ruhs(NvmeCtrl *n, NvmeRequest *req,
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
-    if (!n->base.subsys->endgrp.fdp.enabled) {
+    if (!n->subsys->endgrp.fdp.enabled) {
         return NVME_FDP_DISABLED | NVME_DNR;
     }
 
@@ -4210,7 +4214,7 @@ static uint16_t nvme_io_mgmt_send_ruh_update(NvmeCtrl *n, NvmeRequest *req)
         return NVME_FDP_DISABLED | NVME_DNR;
     }
 
-    maxnpid = n->base.subsys->endgrp.fdp.nrg * n->base.subsys->endgrp.fdp.nruh;
+    maxnpid = n->subsys->endgrp.fdp.nrg * n->subsys->endgrp.fdp.nruh;
 
     if (unlikely(npid >= MIN(NVME_FDP_MAXPIDS, maxnpid))) {
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -4277,7 +4281,7 @@ static uint16_t __nvme_io_cmd_nvm(NvmeCtrl *n, NvmeRequest *req)
 
 static uint16_t nvme_io_cmd_nvm(NvmeCtrl *n, NvmeRequest *req)
 {
-    if (!(n->base.cse.iocs.nvm[req->cmd.opcode] & NVME_CMD_EFF_CSUPP)) {
+    if (!(n->cse.iocs.nvm[req->cmd.opcode] & NVME_CMD_EFF_CSUPP)) {
         trace_pci_nvme_err_invalid_opc(req->cmd.opcode);
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
@@ -4287,7 +4291,7 @@ static uint16_t nvme_io_cmd_nvm(NvmeCtrl *n, NvmeRequest *req)
 
 static uint16_t nvme_io_cmd_zoned(NvmeCtrl *n, NvmeRequest *req)
 {
-    if (!(n->base.cse.iocs.zoned[req->cmd.opcode] & NVME_CMD_EFF_CSUPP)) {
+    if (!(n->cse.iocs.zoned[req->cmd.opcode] & NVME_CMD_EFF_CSUPP)) {
         trace_pci_nvme_err_invalid_opc(req->cmd.opcode);
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
@@ -4414,7 +4418,7 @@ static void nvme_cq_init_notifier(NvmeCQueue *cq)
     }
 
     event_notifier_set_handler(&cq->notifier, nvme_cq_notifier);
-    memory_region_add_eventfd(&n->base.iomem,
+    memory_region_add_eventfd(&n->iomem,
                               0x1000 + offset, 4, false, 0, &cq->notifier);
 }
 
@@ -4474,7 +4478,7 @@ static void nvme_sq_init_notifier(NvmeSQueue *sq)
     }
 
     event_notifier_set_handler(&sq->notifier, nvme_sq_notifier);
-    memory_region_add_eventfd(&n->base.iomem,
+    memory_region_add_eventfd(&n->iomem,
                               0x1000 + offset, 4, false, 0, &sq->notifier);
 }
 
@@ -4505,7 +4509,7 @@ static void nvme_free_sq(NvmeSQueue *sq, NvmeCtrl *n)
     n->base.sq[sq->sqid] = NULL;
     qemu_bh_delete(sq->bh);
     if (sq->sqid && sq->notifier.initialized) {
-        memory_region_del_eventfd(&n->base.iomem,
+        memory_region_del_eventfd(&n->iomem,
                                   0x1000 + offset, 4, false, 0, &sq->notifier);
         event_notifier_set_handler(&sq->notifier, NULL);
         event_notifier_cleanup(&sq->notifier);
@@ -4571,9 +4575,9 @@ static void __nvme_init_sq(NvmeSQueue *sq)
     sq->bh = qemu_bh_new_guarded(nvme_process_sq, sq,
                                  &DEVICE(sq->ctrl)->mem_reentrancy_guard);
 
-    if (n->base.dbbuf_enabled) {
-        sq->db_addr = n->base.dbbuf_dbs + (sqid << 3);
-        sq->ei_addr = n->base.dbbuf_eis + (sqid << 3);
+    if (n->dbbuf_enabled) {
+        sq->db_addr = n->dbbuf_dbs + (sqid << 3);
+        sq->ei_addr = n->dbbuf_eis + (sqid << 3);
 
         if (sq->sqid != 0) {
             nvme_sq_init_notifier(sq);
@@ -4793,7 +4797,7 @@ static uint16_t nvme_endgrp_info(NvmeCtrl *n,  uint8_t rae, uint32_t buf_len,
     uint32_t trans_len;
     int i;
 
-    if (!n->base.subsys || endgrpid != 0x1) {
+    if (!n->subsys || endgrpid != 0x1) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -4802,7 +4806,7 @@ static uint16_t nvme_endgrp_info(NvmeCtrl *n,  uint8_t rae, uint32_t buf_len,
     }
 
     for (i = 1; i <= NVME_MAX_NAMESPACES; i++) {
-        NvmeNamespace *ns = nvme_subsys_ns(n->base.subsys, i);
+        NvmeNamespace *ns = nvme_subsys_ns(n->subsys, i);
         if (!ns) {
             continue;
         }
@@ -4878,7 +4882,7 @@ static uint16_t nvme_changed_nslist(NvmeCtrl *n, uint8_t rae, uint32_t buf_len,
 
     trans_len = MIN(sizeof(nslist) - off, buf_len);
 
-    while ((nsid = find_first_bit(n->base.changed_nsids, NVME_CHANGED_NSID_SIZE)) !=
+    while ((nsid = find_first_bit(n->changed_nsids, NVME_CHANGED_NSID_SIZE)) !=
             NVME_CHANGED_NSID_SIZE) {
         /*
          * If more than 1024 namespaces, the first entry in the log page should
@@ -4891,7 +4895,7 @@ static uint16_t nvme_changed_nslist(NvmeCtrl *n, uint8_t rae, uint32_t buf_len,
         }
 
         nslist[i++] = nsid;
-        clear_bit(nsid, n->base.changed_nsids);
+        clear_bit(nsid, n->changed_nsids);
     }
 
     /*
@@ -4899,7 +4903,7 @@ static uint16_t nvme_changed_nslist(NvmeCtrl *n, uint8_t rae, uint32_t buf_len,
      * more than 1024 namespaces.
      */
     if (nslist[0] == 0xffffffff) {
-        bitmap_zero(n->base.changed_nsids, NVME_CHANGED_NSID_SIZE);
+        bitmap_zero(n->changed_nsids, NVME_CHANGED_NSID_SIZE);
     }
 
     if (!rae) {
@@ -4923,23 +4927,23 @@ static uint16_t nvme_cmd_effects(NvmeCtrl *n, uint8_t csi, uint32_t buf_len,
 
     switch (NVME_CC_CSS(ldl_le_p(&n->base.bar.cc))) {
     case NVME_CC_CSS_NVM:
-        iocs = n->base.cse.iocs.nvm;
+        iocs = n->cse.iocs.nvm;
         break;
 
     case NVME_CC_CSS_ALL:
         switch (csi) {
         case NVME_CSI_NVM:
-            iocs = n->base.cse.iocs.nvm;
+            iocs = n->cse.iocs.nvm;
             break;
         case NVME_CSI_ZONED:
-            iocs = n->base.cse.iocs.zoned;
+            iocs = n->cse.iocs.zoned;
             break;
         }
 
         break;
     }
 
-    memcpy(log.acs, n->base.cse.acs, sizeof(log.acs));
+    memcpy(log.acs, n->cse.acs, sizeof(log.acs));
 
     if (iocs) {
         memcpy(log.iocs, iocs, sizeof(log.iocs));
@@ -4986,11 +4990,11 @@ static uint16_t nvme_fdp_confs(NvmeCtrl *n, uint32_t endgrpid, uint32_t buf_len,
     size_t nruh, fdp_descr_size;
     int i;
 
-    if (endgrpid != 1 || !n->base.subsys) {
+    if (endgrpid != 1 || !n->subsys) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    endgrp = &n->base.subsys->endgrp;
+    endgrp = &n->subsys->endgrp;
 
     if (endgrp->fdp.enabled) {
         nruh = endgrp->fdp.nruh;
@@ -5056,11 +5060,11 @@ static uint16_t nvme_fdp_ruh_usage(NvmeCtrl *n, uint32_t endgrpid,
     uint32_t log_size, trans_len;
     uint16_t i;
 
-    if (endgrpid != 1 || !n->base.subsys) {
+    if (endgrpid != 1 || !n->subsys) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    endgrp = &n->base.subsys->endgrp;
+    endgrp = &n->subsys->endgrp;
 
     if (!endgrp->fdp.enabled) {
         return NVME_FDP_DISABLED | NVME_DNR;
@@ -5099,15 +5103,15 @@ static uint16_t nvme_fdp_stats(NvmeCtrl *n, uint32_t endgrpid, uint32_t buf_len,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    if (endgrpid != 1 || !n->base.subsys) {
+    if (endgrpid != 1 || !n->subsys) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    if (!n->base.subsys->endgrp.fdp.enabled) {
+    if (!n->subsys->endgrp.fdp.enabled) {
         return NVME_FDP_DISABLED | NVME_DNR;
     }
 
-    endgrp = &n->base.subsys->endgrp;
+    endgrp = &n->subsys->endgrp;
 
     trans_len = MIN(sizeof(log) - off, buf_len);
 
@@ -5131,11 +5135,11 @@ static uint16_t nvme_fdp_events(NvmeCtrl *n, uint32_t endgrpid,
     g_autofree NvmeFdpEventsLog *elog = NULL;
     NvmeFdpEvent *event;
 
-    if (endgrpid != 1 || !n->base.subsys) {
+    if (endgrpid != 1 || !n->subsys) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    endgrp = &n->base.subsys->endgrp;
+    endgrp = &n->subsys->endgrp;
 
     if (!endgrp->fdp.enabled) {
         return NVME_FDP_DISABLED | NVME_DNR;
@@ -5247,7 +5251,7 @@ static void nvme_free_cq(NvmeCQueue *cq, NvmeCtrl *n)
     n->base.cq[cq->cqid] = NULL;
     qemu_bh_delete(cq->bh);
     if (cq->cqid && cq->notifier.initialized) {
-        memory_region_del_eventfd(&n->base.iomem,
+        memory_region_del_eventfd(&n->iomem,
                                   0x1000 + offset, 4, false, 0, &cq->notifier);
         event_notifier_set_handler(&cq->notifier, NULL);
         event_notifier_cleanup(&cq->notifier);
@@ -5299,9 +5303,9 @@ static void __nvme_init_cq(NvmeCQueue *cq)
     }
 
     QTAILQ_INIT(&cq->sq_list);
-    if (n->base.dbbuf_enabled) {
-        cq->db_addr = n->base.dbbuf_dbs + (cqid << 3) + (1 << 2);
-        cq->ei_addr = n->base.dbbuf_eis + (cqid << 3) + (1 << 2);
+    if (n->dbbuf_enabled) {
+        cq->db_addr = n->dbbuf_dbs + (cqid << 3) + (1 << 2);
+        cq->ei_addr = n->dbbuf_eis + (cqid << 3) + (1 << 2);
 
         if (cqid != 0) {
             nvme_cq_init_notifier(cq);
@@ -5485,7 +5489,7 @@ static uint16_t nvme_identify_ns(NvmeCtrl *n, NvmeRequest *req, bool active)
     ns = nvme_ns(&n->base, nsid);
     if (unlikely(!ns)) {
         if (!active) {
-            ns = nvme_subsys_ns(n->base.subsys, nsid);
+            ns = nvme_subsys_ns(n->subsys, nsid);
             if (!ns) {
                 return nvme_rpt_empty_id_struct(n, req);
             }
@@ -5516,7 +5520,7 @@ static uint16_t nvme_identify_ctrl_list(NvmeCtrl *n, NvmeRequest *req,
 
     trace_pci_nvme_identify_ctrl_list(c->cns, min_id);
 
-    if (!n->base.subsys) {
+    if (!n->subsys) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -5525,14 +5529,14 @@ static uint16_t nvme_identify_ctrl_list(NvmeCtrl *n, NvmeRequest *req,
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 
-        ns = nvme_subsys_ns(n->base.subsys, nsid);
+        ns = nvme_subsys_ns(n->subsys, nsid);
         if (!ns) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
     }
 
-    for (cntlid = min_id; cntlid < ARRAY_SIZE(n->base.subsys->ctrls); cntlid++) {
-        ctrl = nvme_ctrl_of(nvme_subsys_ctrl(n->base.subsys, cntlid));
+    for (cntlid = min_id; cntlid < ARRAY_SIZE(n->subsys->ctrls); cntlid++) {
+        ctrl = nvme_ctrl_of(nvme_subsys_ctrl(n->subsys, cntlid));
         if (!ctrl) {
             continue;
         }
@@ -5552,25 +5556,25 @@ static uint16_t nvme_identify_ctrl_list(NvmeCtrl *n, NvmeRequest *req,
 
 static uint16_t nvme_identify_pri_ctrl_cap(NvmeCtrl *n, NvmeRequest *req)
 {
-    trace_pci_nvme_identify_pri_ctrl_cap(le16_to_cpu(n->base.pri_ctrl_cap.cntlid));
+    trace_pci_nvme_identify_pri_ctrl_cap(le16_to_cpu(n->pri_ctrl_cap.cntlid));
 
-    return nvme_c2h(&n->base, (uint8_t *)&n->base.pri_ctrl_cap,
-                    sizeof(NvmePriCtrlCap), NVME_IDENTIFY_DATA_SIZE, req);
+    return nvme_c2h(&n->base, (uint8_t *)&n->pri_ctrl_cap, sizeof(NvmePriCtrlCap),
+                    NVME_IDENTIFY_DATA_SIZE, req);
 }
 
 static uint16_t nvme_identify_sec_ctrl_list(NvmeCtrl *n, NvmeRequest *req)
 {
     NvmeIdentify *c = (NvmeIdentify *)&req->cmd;
-    uint16_t pri_ctrl_id = le16_to_cpu(n->base.pri_ctrl_cap.cntlid);
+    uint16_t pri_ctrl_id = le16_to_cpu(n->pri_ctrl_cap.cntlid);
     uint16_t min_id = le16_to_cpu(c->ctrlid);
-    uint8_t num_sec_ctrl = n->base.nr_sec_ctrls;
+    uint8_t num_sec_ctrl = n->nr_sec_ctrls;
     NvmeSecCtrlList list = {0};
     uint8_t i;
 
     for (i = 0; i < num_sec_ctrl; i++) {
-        if (n->base.sec_ctrl_list[i].scid >= min_id) {
+        if (n->sec_ctrl_list[i].scid >= min_id) {
             list.numcntl = MIN(num_sec_ctrl - i, 127);
-            memcpy(&list.sec, n->base.sec_ctrl_list + i,
+            memcpy(&list.sec, n->sec_ctrl_list + i,
                    list.numcntl * sizeof(NvmeSecCtrlEntry));
             break;
         }
@@ -5597,7 +5601,7 @@ static uint16_t nvme_identify_ns_ind(NvmeCtrl *n, NvmeRequest *req, bool alloc)
     ns = nvme_ns(&n->base, nsid);
     if (unlikely(!ns)) {
         if (alloc) {
-            ns = nvme_subsys_ns(n->base.subsys, nsid);
+            ns = nvme_subsys_ns(n->subsys, nsid);
             if (!ns) {
                 return nvme_rpt_empty_id_struct(n, req);
             }
@@ -5626,7 +5630,7 @@ static uint16_t nvme_identify_ns_csi(NvmeCtrl *n, NvmeRequest *req,
     ns = nvme_ns(&n->base, nsid);
     if (unlikely(!ns)) {
         if (!active) {
-            ns = nvme_subsys_ns(n->base.subsys, nsid);
+            ns = nvme_subsys_ns(n->subsys, nsid);
             if (!ns) {
                 return nvme_rpt_empty_id_struct(n, req);
             }
@@ -5673,7 +5677,7 @@ static uint16_t nvme_identify_nslist(NvmeCtrl *n, NvmeRequest *req,
         ns = nvme_ns(&n->base, i);
         if (!ns) {
             if (!active) {
-                ns = nvme_subsys_ns(n->base.subsys, i);
+                ns = nvme_subsys_ns(n->subsys, i);
                 if (!ns) {
                     continue;
                 }
@@ -5721,7 +5725,7 @@ static uint16_t nvme_identify_nslist_csi(NvmeCtrl *n, NvmeRequest *req,
         ns = nvme_ns(&n->base, i);
         if (!ns) {
             if (!active) {
-                ns = nvme_subsys_ns(n->base.subsys, i);
+                ns = nvme_subsys_ns(n->subsys, i);
                 if (!ns) {
                     continue;
                 }
@@ -5943,14 +5947,14 @@ static inline void nvme_set_timestamp(NvmeCtrl *n, uint64_t ts)
 {
     trace_pci_nvme_setfeat_timestamp(ts);
 
-    n->base.host_timestamp = le64_to_cpu(ts);
-    n->base.timestamp_set_qemu_clock_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+    n->host_timestamp = le64_to_cpu(ts);
+    n->timestamp_set_qemu_clock_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
 }
 
 static inline uint64_t nvme_get_timestamp(const NvmeCtrl *n)
 {
     uint64_t current_time = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
-    uint64_t elapsed_time = current_time - n->base.timestamp_set_qemu_clock_ms;
+    uint64_t elapsed_time = current_time - n->timestamp_set_qemu_clock_ms;
 
     union nvme_timestamp {
         struct {
@@ -5964,10 +5968,10 @@ static inline uint64_t nvme_get_timestamp(const NvmeCtrl *n)
 
     union nvme_timestamp ts;
     ts.all = 0;
-    ts.timestamp = n->base.host_timestamp + elapsed_time;
+    ts.timestamp = n->host_timestamp + elapsed_time;
 
     /* If the host timestamp is non-zero, set the timestamp origin */
-    ts.origin = n->base.host_timestamp ? 0x01 : 0x00;
+    ts.origin = n->host_timestamp ? 0x01 : 0x00;
 
     trace_pci_nvme_getfeat_timestamp(ts.all);
 
@@ -5987,7 +5991,7 @@ static int nvme_get_feature_fdp(NvmeCtrl *n, uint32_t endgrpid,
 {
     *result = 0;
 
-    if (!n->base.subsys || !n->base.subsys->endgrp.fdp.enabled) {
+    if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -6012,7 +6016,7 @@ static uint16_t nvme_get_feature_fdp_events(NvmeCtrl *n, NvmeNamespace *ns,
     NvmeRuHandle *ruh;
     NvmeFdpEventDescr *s_event;
 
-    if (!n->base.subsys || !n->base.subsys->endgrp.fdp.enabled) {
+    if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
         return NVME_FDP_DISABLED | NVME_DNR;
     }
 
@@ -6021,7 +6025,7 @@ static uint16_t nvme_get_feature_fdp_events(NvmeCtrl *n, NvmeNamespace *ns,
     }
 
     ruhid = ns->fdp.phs[ph];
-    ruh = &n->base.subsys->endgrp.fdp.ruhs[ruhid];
+    ruh = &n->subsys->endgrp.fdp.ruhs[ruhid];
 
     assert(ruh);
 
@@ -6284,7 +6288,7 @@ static uint16_t nvme_set_feature_fdp_events(NvmeCtrl *n, NvmeNamespace *ns,
 
     assert(ns);
 
-    if (!n->base.subsys || !n->base.subsys->endgrp.fdp.enabled) {
+    if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
         return NVME_FDP_DISABLED | NVME_DNR;
     }
 
@@ -6297,7 +6301,7 @@ static uint16_t nvme_set_feature_fdp_events(NvmeCtrl *n, NvmeNamespace *ns,
     }
 
     ruhid = ns->fdp.phs[ph];
-    ruh = &n->base.subsys->endgrp.fdp.ruhs[ruhid];
+    ruh = &n->subsys->endgrp.fdp.ruhs[ruhid];
 
     events = g_malloc0(noet);
 
@@ -6349,7 +6353,7 @@ static uint16_t nvme_set_feature_write_atomicity(NvmeCtrl *n, NvmeRequest *req)
 
     n->base.dn = dw11 & 0x1;
 
-    nvme_atomic_configure_max_write_size(n->base.dn, awun, awupf, &n->base.atomic);
+    nvme_atomic_configure_max_write_size(n->base.dn, awun, awupf, &n->atomic);
 
     for (int i = 1; i <= NVME_MAX_NAMESPACES; i++) {
         uint16_t nawun, nawupf, nabsn, nabspf;
@@ -6630,7 +6634,7 @@ static uint16_t nvme_ns_attachment(NvmeCtrl *n, NvmeRequest *req)
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
-    ns = nvme_subsys_ns(n->base.subsys, nsid);
+    ns = nvme_subsys_ns(n->subsys, nsid);
     if (!ns) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -6646,7 +6650,7 @@ static uint16_t nvme_ns_attachment(NvmeCtrl *n, NvmeRequest *req)
 
     *nr_ids = MIN(*nr_ids, NVME_CONTROLLER_LIST_SIZE - 1);
     for (i = 0; i < *nr_ids; i++) {
-        ctrl = nvme_ctrl_of(nvme_subsys_ctrl(n->base.subsys, ids[i]));
+        ctrl = nvme_ctrl_of(nvme_subsys_ctrl(n->subsys, ids[i]));
         if (!ctrl) {
             return NVME_NS_CTRL_LIST_INVALID | NVME_DNR;
         }
@@ -6688,7 +6692,7 @@ static uint16_t nvme_ns_attachment(NvmeCtrl *n, NvmeRequest *req)
          * Add namespace id to the changed namespace id list for event clearing
          * via Get Log Page command.
          */
-        if (!test_and_set_bit(nsid, ctrl->base.changed_nsids)) {
+        if (!test_and_set_bit(nsid, ctrl->changed_nsids)) {
             nvme_enqueue_event(ctrl, NVME_AER_TYPE_NOTICE,
                                NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED,
                                NVME_LOG_CHANGED_NSLIST);
@@ -6700,7 +6704,7 @@ static uint16_t nvme_ns_attachment(NvmeCtrl *n, NvmeRequest *req)
 
 void nvme_ctrl_notify_ns_resize(NvmeCtrl *ctrl, NvmeNamespace *ns)
 {
-    if (!test_and_set_bit(ns->params.nsid, ctrl->base.changed_nsids)) {
+    if (!test_and_set_bit(ns->params.nsid, ctrl->changed_nsids)) {
         nvme_enqueue_event(ctrl, NVME_AER_TYPE_NOTICE,
                            NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED,
                            NVME_LOG_CHANGED_NSLIST);
@@ -6913,10 +6917,10 @@ static void nvme_get_virt_res_num(NvmeCtrl *n, uint8_t rt, int *num_total,
                                   int *num_prim, int *num_sec)
 {
     *num_total = le32_to_cpu(rt ?
-                             n->base.pri_ctrl_cap.vifrt : n->base.pri_ctrl_cap.vqfrt);
+                             n->pri_ctrl_cap.vifrt : n->pri_ctrl_cap.vqfrt);
     *num_prim = le16_to_cpu(rt ?
-                            n->base.pri_ctrl_cap.virfap : n->base.pri_ctrl_cap.vqrfap);
-    *num_sec = le16_to_cpu(rt ? n->base.pri_ctrl_cap.virfa : n->base.pri_ctrl_cap.vqrfa);
+                            n->pri_ctrl_cap.virfap : n->pri_ctrl_cap.vqrfap);
+    *num_sec = le16_to_cpu(rt ? n->pri_ctrl_cap.virfa : n->pri_ctrl_cap.vqrfa);
 }
 
 static uint16_t nvme_assign_virt_res_to_prim(NvmeCtrl *n, NvmeRequest *req,
@@ -6925,7 +6929,7 @@ static uint16_t nvme_assign_virt_res_to_prim(NvmeCtrl *n, NvmeRequest *req,
 {
     int num_total, num_prim, num_sec;
 
-    if (cntlid != n->base.cntlid) {
+    if (cntlid != n->cntlid) {
         return NVME_INVALID_CTRL_ID | NVME_DNR;
     }
 
@@ -6940,9 +6944,9 @@ static uint16_t nvme_assign_virt_res_to_prim(NvmeCtrl *n, NvmeRequest *req,
     }
 
     if (rt) {
-        n->base.next_pri_ctrl_cap.virfap = cpu_to_le16(nr);
+        n->next_pri_ctrl_cap.virfap = cpu_to_le16(nr);
     } else {
-        n->base.next_pri_ctrl_cap.vqrfap = cpu_to_le16(nr);
+        n->next_pri_ctrl_cap.vqrfap = cpu_to_le16(nr);
     }
 
     req->cqe.result = cpu_to_le32(nr);
@@ -6956,14 +6960,14 @@ static void nvme_update_virt_res(NvmeCtrl *n, NvmeSecCtrlEntry *sctrl,
 
     if (rt) {
         prev_nr = le16_to_cpu(sctrl->nvi);
-        prev_total = le32_to_cpu(n->base.pri_ctrl_cap.virfa);
+        prev_total = le32_to_cpu(n->pri_ctrl_cap.virfa);
         sctrl->nvi = cpu_to_le16(nr);
-        n->base.pri_ctrl_cap.virfa = cpu_to_le32(prev_total + nr - prev_nr);
+        n->pri_ctrl_cap.virfa = cpu_to_le32(prev_total + nr - prev_nr);
     } else {
         prev_nr = le16_to_cpu(sctrl->nvq);
-        prev_total = le32_to_cpu(n->base.pri_ctrl_cap.vqrfa);
+        prev_total = le32_to_cpu(n->pri_ctrl_cap.vqrfa);
         sctrl->nvq = cpu_to_le16(nr);
-        n->base.pri_ctrl_cap.vqrfa = cpu_to_le32(prev_total + nr - prev_nr);
+        n->pri_ctrl_cap.vqrfa = cpu_to_le32(prev_total + nr - prev_nr);
     }
 }
 
@@ -6982,7 +6986,7 @@ static uint16_t nvme_assign_virt_res_to_sec(NvmeCtrl *n, NvmeRequest *req,
         return NVME_INVALID_SEC_CTRL_STATE | NVME_DNR;
     }
 
-    limit = le16_to_cpu(rt ? n->base.pri_ctrl_cap.vifrsm : n->base.pri_ctrl_cap.vqfrsm);
+    limit = le16_to_cpu(rt ? n->pri_ctrl_cap.vifrsm : n->pri_ctrl_cap.vqfrsm);
     if (nr > limit) {
         return NVME_INVALID_NUM_RESOURCES | NVME_DNR;
     }
@@ -7102,9 +7106,9 @@ static uint16_t nvme_dbbuf_config(NvmeCtrl *n, const NvmeRequest *req)
     }
 
     /* Save shadow buffer base addr for use during queue creation */
-    n->base.dbbuf_dbs = dbs_addr;
-    n->base.dbbuf_eis = eis_addr;
-    n->base.dbbuf_enabled = true;
+    n->dbbuf_dbs = dbs_addr;
+    n->dbbuf_eis = eis_addr;
+    n->dbbuf_enabled = true;
 
     for (i = 0; i < n->base.num_queues; i++) {
         NvmeSQueue *sq = n->base.sq[i];
@@ -7409,7 +7413,7 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
     trace_pci_nvme_admin_cmd(nvme_cid(req), nvme_sqid(req), req->cmd.opcode,
                              nvme_adm_opc_str(req->cmd.opcode));
 
-    if (!(n->base.cse.acs[req->cmd.opcode] & NVME_CMD_EFF_CSUPP)) {
+    if (!(n->cse.acs[req->cmd.opcode] & NVME_CMD_EFF_CSUPP)) {
         trace_pci_nvme_err_invalid_admin_opc(req->cmd.opcode);
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
@@ -7515,8 +7519,8 @@ static int nvme_atomic_boundary_check(NvmeCtrl *n, NvmeCmd *cmd,
              * The write crosses an atomic boundary and the controller provides
              * no atomicity guarantees unless AWUN/AWUPF are non-zero.
              */
-            if (n->base.atomic.atomic_max_write_size &&
-                ((nlb + 1) <= n->base.atomic.atomic_max_write_size)) {
+            if (n->atomic.atomic_max_write_size &&
+                ((nlb + 1) <= n->atomic.atomic_max_write_size)) {
                 return 1;
             }
             return 0;
@@ -7608,8 +7612,8 @@ static NvmeAtomic *nvme_get_atomic(NvmeCtrl *n, NvmeCmd *cmd)
         return &ns->atomic;
     }
 
-    if (n->base.atomic.atomic_writes) {
-        return &n->base.atomic;
+    if (n->atomic.atomic_writes) {
+        return &n->atomic;
     }
     return NULL;
 }
@@ -7703,7 +7707,7 @@ static void nvme_update_msixcap_ts(PCIDevice *pci_dev, uint32_t table_size)
 static void nvme_activate_virt_res(NvmeCtrl *n)
 {
     PCIDevice *pci_dev = PCI_DEVICE(n);
-    NvmePriCtrlCap *cap = &n->base.pri_ctrl_cap;
+    NvmePriCtrlCap *cap = &n->pri_ctrl_cap;
     NvmeSecCtrlEntry *sctrl;
 
     /* -1 to account for the admin queue */
@@ -7714,8 +7718,8 @@ static void nvme_activate_virt_res(NvmeCtrl *n)
         n->base.conf_ioqpairs = sctrl->nvq ? le16_to_cpu(sctrl->nvq) - 1 : 0;
         n->base.conf_msix_qsize = sctrl->nvi ? le16_to_cpu(sctrl->nvi) : 1;
     } else {
-        cap->vqrfap = n->base.next_pri_ctrl_cap.vqrfap;
-        cap->virfap = n->base.next_pri_ctrl_cap.virfap;
+        cap->vqrfap = n->next_pri_ctrl_cap.vqrfap;
+        cap->virfap = n->next_pri_ctrl_cap.virfap;
         n->base.conf_ioqpairs = le16_to_cpu(cap->vqprt) +
                            le16_to_cpu(cap->vqrfap) - 1;
         n->base.conf_msix_qsize = le16_to_cpu(cap->viprt) +
@@ -7770,8 +7774,8 @@ static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst)
 
     if (n->base.params.sriov_max_vfs) {
         if (!pci_is_vf(pci_dev)) {
-            for (i = 0; i < n->base.nr_sec_ctrls; i++) {
-                sctrl = &n->base.sec_ctrl_list[i];
+            for (i = 0; i < n->nr_sec_ctrls; i++) {
+                sctrl = &n->sec_ctrl_list[i];
                 nvme_virt_set_state(n, le16_to_cpu(sctrl->scid), false);
             }
         }
@@ -7781,8 +7785,8 @@ static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst)
         }
     }
 
-    n->base.aer_queued = 0;
-    n->base.aer_mask = 0;
+    n->aer_queued = 0;
+    n->aer_mask = 0;
     n->base.outstanding_aers = 0;
     n->base.qs_created = false;
 
@@ -7802,9 +7806,9 @@ static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst)
     stl_le_p(&n->base.bar.intmc, 0);
     stl_le_p(&n->base.bar.cc, 0);
 
-    n->base.dbbuf_dbs = 0;
-    n->base.dbbuf_eis = 0;
-    n->base.dbbuf_enabled = false;
+    n->dbbuf_dbs = 0;
+    n->dbbuf_eis = 0;
+    n->dbbuf_enabled = false;
 }
 
 static void nvme_ctrl_shutdown(NvmeCtrl *n)
@@ -7812,8 +7816,8 @@ static void nvme_ctrl_shutdown(NvmeCtrl *n)
     NvmeNamespace *ns;
     int i;
 
-    if (n->base.pmr.dev) {
-        memory_region_msync(&n->base.pmr.dev->mr, 0, n->base.pmr.dev->size);
+    if (n->pmr.dev) {
+        memory_region_msync(&n->pmr.dev->mr, 0, n->pmr.dev->size);
     }
 
     for (i = 1; i <= NVME_MAX_NAMESPACES; i++) {
@@ -7894,7 +7898,7 @@ static int nvme_start_ctrl(NvmeCtrl *n)
 
     /* verify that the command sets of attached namespaces are supported */
     for (int i = 1; i <= NVME_MAX_NAMESPACES; i++) {
-        NvmeNamespace *ns = nvme_subsys_ns(n->base.subsys, i);
+        NvmeNamespace *ns = nvme_subsys_ns(n->subsys, i);
 
         if (!ns || (!ns->params.shared && ns->ctrl != &n->base)) {
             continue;
@@ -8071,7 +8075,7 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
         }
 
         stn_le_p(&n->base.bar.cmbmsc, size, data);
-        n->base.cmb.cmse = false;
+        n->cmb.cmse = false;
 
         if (NVME_CMBMSC_CRE(data)) {
             nvme_cmb_enable_regs(n);
@@ -8079,15 +8083,15 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
             if (NVME_CMBMSC_CMSE(data)) {
                 uint64_t cmbmsc = ldq_le_p(&n->base.bar.cmbmsc);
                 hwaddr cba = NVME_CMBMSC_CBA(cmbmsc) << CMBMSC_CBA_SHIFT;
-                if (cba + int128_get64(n->base.cmb.mem.size) < cba) {
+                if (cba + int128_get64(n->cmb.mem.size) < cba) {
                     uint32_t cmbsts = ldl_le_p(&n->base.bar.cmbsts);
                     NVME_CMBSTS_SET_CBAI(cmbsts, 1);
                     stl_le_p(&n->base.bar.cmbsts, cmbsts);
                     return;
                 }
 
-                n->base.cmb.cba = cba;
-                n->base.cmb.cmse = true;
+                n->cmb.cba = cba;
+                n->cmb.cmse = true;
             }
         } else {
             n->base.bar.cmbsz = 0;
@@ -8110,12 +8114,12 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
 
         stl_le_p(&n->base.bar.pmrctl, data);
         if (NVME_PMRCTL_EN(data)) {
-            memory_region_set_enabled(&n->base.pmr.dev->mr, true);
+            memory_region_set_enabled(&n->pmr.dev->mr, true);
             pmrsts = 0;
         } else {
-            memory_region_set_enabled(&n->base.pmr.dev->mr, false);
+            memory_region_set_enabled(&n->pmr.dev->mr, false);
             NVME_PMRSTS_SET_NRDY(pmrsts, 1);
-            n->base.pmr.cmse = false;
+            n->pmr.cmse = false;
         }
         stl_le_p(&n->base.bar.pmrsts, pmrsts);
         return;
@@ -8137,20 +8141,20 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
         }
 
         stl_le_p(&n->base.bar.pmrmscl, data);
-        n->base.pmr.cmse = false;
+        n->pmr.cmse = false;
 
         if (NVME_PMRMSCL_CMSE(data)) {
             uint64_t pmrmscu = ldl_le_p(&n->base.bar.pmrmscu);
             hwaddr cba = pmrmscu << 32 |
                 (NVME_PMRMSCL_CBA(data) << PMRMSCL_CBA_SHIFT);
-            if (cba + int128_get64(n->base.pmr.dev->mr.size) < cba) {
+            if (cba + int128_get64(n->pmr.dev->mr.size) < cba) {
                 NVME_PMRSTS_SET_CBAI(pmrsts, 1);
                 stl_le_p(&n->base.bar.pmrsts, pmrsts);
                 return;
             }
 
-            n->base.pmr.cmse = true;
-            n->base.pmr.cba = cba;
+            n->pmr.cmse = true;
+            n->pmr.cba = cba;
         }
 
         return;
@@ -8210,7 +8214,7 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
      */
     if (addr == NVME_REG_PMRSTS &&
         (NVME_PMRCAP_PMRWBM(ldl_le_p(&n->base.bar.pmrcap)) & 0x02)) {
-        memory_region_msync(&n->base.pmr.dev->mr, 0, n->base.pmr.dev->size);
+        memory_region_msync(&n->pmr.dev->mr, 0, n->pmr.dev->size);
     }
 
     return ldn_le_p(ptr + addr, size);
@@ -8297,7 +8301,7 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
         }
 
         cq->head = new_head;
-        if (!qid && n->base.dbbuf_enabled) {
+        if (!qid && n->dbbuf_enabled) {
             stl_le_pci_dma(pci, cq->db_addr, cq->head, MEMTXATTRS_UNSPECIFIED);
         }
 
@@ -8343,7 +8347,7 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
         trace_pci_nvme_mmio_doorbell_sq(sq->sqid, new_tail);
 
         sq->tail = new_tail;
-        if (!qid && n->base.dbbuf_enabled) {
+        if (!qid && n->dbbuf_enabled) {
             /*
              * The spec states "the host shall also update the controller's
              * corresponding doorbell property to match the value of that entry
@@ -8398,13 +8402,13 @@ static void nvme_cmb_write(void *opaque, hwaddr addr, uint64_t data,
                            unsigned size)
 {
     NvmeCtrl *n = (NvmeCtrl *)opaque;
-    stn_le_p(&n->base.cmb.buf[addr], size, data);
+    stn_le_p(&n->cmb.buf[addr], size, data);
 }
 
 static uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size)
 {
     NvmeCtrl *n = (NvmeCtrl *)opaque;
-    return ldn_le_p(&n->base.cmb.buf[addr], size);
+    return ldn_le_p(&n->cmb.buf[addr], size);
 }
 
 static const MemoryRegionOps nvme_cmb_ops = {
@@ -8430,7 +8434,7 @@ static bool nvme_check_params(NvmeCtrl *n, Error **errp)
 
     n->base.num_queues = params->max_ioqpairs + 1;
 
-    if (n->base.namespace.blkconf.blk && n->base.subsys) {
+    if (n->base.namespace.blkconf.blk && n->subsys) {
         error_setg(errp, "subsystem support is unavailable with legacy "
                    "namespace ('drive' property)");
         return false;
@@ -8479,24 +8483,24 @@ static bool nvme_check_params(NvmeCtrl *n, Error **errp)
         return false;
     }
 
-    if (n->base.pmr.dev) {
+    if (n->pmr.dev) {
         if (params->msix_exclusive_bar) {
             error_setg(errp, "not enough BARs available to enable PMR");
             return false;
         }
 
-        if (host_memory_backend_is_mapped(n->base.pmr.dev)) {
+        if (host_memory_backend_is_mapped(n->pmr.dev)) {
             error_setg(errp, "can't use already busy memdev: %s",
-                       object_get_canonical_path_component(OBJECT(n->base.pmr.dev)));
+                       object_get_canonical_path_component(OBJECT(n->pmr.dev)));
             return false;
         }
 
-        if (!is_power_of_2(n->base.pmr.dev->size)) {
+        if (!is_power_of_2(n->pmr.dev->size)) {
             error_setg(errp, "pmr backend size needs to be power of 2 in size");
             return false;
         }
 
-        host_memory_backend_set_mapped(n->base.pmr.dev, true);
+        host_memory_backend_set_mapped(n->pmr.dev, true);
     }
 
     if (!n->base.params.mdts || ((1 << n->base.params.mdts) + 1) > IOV_MAX) {
@@ -8516,7 +8520,7 @@ static bool nvme_check_params(NvmeCtrl *n, Error **errp)
     }
 
     if (params->sriov_max_vfs) {
-        if (!n->base.subsys) {
+        if (!n->subsys) {
             error_setg(errp, "subsystem is required for the use of SR-IOV");
             return false;
         }
@@ -8526,7 +8530,7 @@ static bool nvme_check_params(NvmeCtrl *n, Error **errp)
             return false;
         }
 
-        if (n->base.pmr.dev) {
+        if (n->pmr.dev) {
             error_setg(errp, "PMR is not supported with SR-IOV");
             return false;
         }
@@ -8584,8 +8588,8 @@ static bool nvme_check_params(NvmeCtrl *n, Error **errp)
 
 static void nvme_init_state(NvmeCtrl *n)
 {
-    NvmePriCtrlCap *cap = &n->base.pri_ctrl_cap;
-    NvmeSecCtrlEntry *list = n->base.sec_ctrl_list;
+    NvmePriCtrlCap *cap = &n->pri_ctrl_cap;
+    NvmeSecCtrlEntry *list = n->sec_ctrl_list;
     NvmeSecCtrlEntry *sctrl;
     PCIDevice *pci = PCI_DEVICE(n);
     NvmeIdCtrl *id = &n->base.id_ctrl;
@@ -8611,16 +8615,16 @@ static void nvme_init_state(NvmeCtrl *n)
     n->base.aer_reqs = g_new0(NvmeRequest *, n->base.params.aerl + 1);
     QTAILQ_INIT(&n->base.aer_queue);
 
-    n->base.nr_sec_ctrls = max_vfs;
+    n->nr_sec_ctrls = max_vfs;
     for (i = 0; i < max_vfs; i++) {
         sctrl = &list[i];
-        sctrl->pcid = cpu_to_le16(n->base.cntlid);
+        sctrl->pcid = cpu_to_le16(n->cntlid);
         sctrl->vfn = cpu_to_le16(i + 1);
     }
 
     n->base.spdm_socket = -1;
 
-    cap->cntlid = cpu_to_le16(n->base.cntlid);
+    cap->cntlid = cpu_to_le16(n->cntlid);
     cap->crt = NVME_CRT_VQ | NVME_CRT_VI;
 
     if (pci_is_vf(pci)) {
@@ -8661,7 +8665,7 @@ static void nvme_init_state(NvmeCtrl *n)
 
         nvme_atomic_configure_max_write_size(n->base.dn, n->base.params.atomic_awun,
                                              n->base.params.atomic_awupf,
-                                             &n->base.atomic);
+                                             &n->atomic);
     }
 }
 
@@ -8670,20 +8674,20 @@ static void nvme_init_cmb(NvmeCtrl *n, PCIDevice *pci_dev)
     uint64_t cmb_size = n->base.params.cmb_size_mb * MiB;
     uint64_t cap = ldq_le_p(&n->base.bar.cap);
 
-    n->base.cmb.buf = g_malloc0(cmb_size);
-    memory_region_init_io(&n->base.cmb.mem, OBJECT(n), &nvme_cmb_ops, n,
+    n->cmb.buf = g_malloc0(cmb_size);
+    memory_region_init_io(&n->cmb.mem, OBJECT(n), &nvme_cmb_ops, n,
                           "nvme-cmb", cmb_size);
     pci_register_bar(pci_dev, NVME_CMB_BIR,
                      PCI_BASE_ADDRESS_SPACE_MEMORY |
                      PCI_BASE_ADDRESS_MEM_TYPE_64 |
-                     PCI_BASE_ADDRESS_MEM_PREFETCH, &n->base.cmb.mem);
+                     PCI_BASE_ADDRESS_MEM_PREFETCH, &n->cmb.mem);
 
     NVME_CAP_SET_CMBS(cap, 1);
     stq_le_p(&n->base.bar.cap, cap);
 
     if (n->base.params.legacy_cmb) {
         nvme_cmb_enable_regs(n);
-        n->base.cmb.cmse = true;
+        n->cmb.cmse = true;
     }
 }
 
@@ -8691,7 +8695,7 @@ static bool nvme_init_pmr(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
 {
     uint32_t pmrcap = ldl_le_p(&n->base.bar.pmrcap);
 
-    if (memory_region_size(&n->base.pmr.dev->mr) < 16) {
+    if (memory_region_size(&n->pmr.dev->mr) < 16) {
         error_setg(errp, "PMR device must have at least 16 bytes");
         return false;
     }
@@ -8707,9 +8711,9 @@ static bool nvme_init_pmr(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
     pci_register_bar(pci_dev, NVME_PMR_BIR,
                      PCI_BASE_ADDRESS_SPACE_MEMORY |
                      PCI_BASE_ADDRESS_MEM_TYPE_64 |
-                     PCI_BASE_ADDRESS_MEM_PREFETCH, &n->base.pmr.dev->mr);
+                     PCI_BASE_ADDRESS_MEM_PREFETCH, &n->pmr.dev->mr);
 
-    memory_region_set_enabled(&n->base.pmr.dev->mr, false);
+    memory_region_set_enabled(&n->pmr.dev->mr, false);
 
     return true;
 }
@@ -8751,7 +8755,7 @@ static bool nvme_init_sriov(NvmeCtrl *n, PCIDevice *pci_dev, uint16_t offset,
 {
     uint16_t vf_dev_id = n->base.params.use_intel_id ?
                          PCI_DEVICE_ID_INTEL_NVME : PCI_DEVICE_ID_REDHAT_NVME;
-    NvmePriCtrlCap *cap = &n->base.pri_ctrl_cap;
+    NvmePriCtrlCap *cap = &n->pri_ctrl_cap;
     uint64_t bar_size = nvme_mbar_size(le16_to_cpu(cap->vqfrsm),
                                       le16_to_cpu(cap->vifrsm),
                                       NULL, NULL);
@@ -8840,10 +8844,10 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
 
     if (n->base.params.msix_exclusive_bar && !pci_is_vf(pci_dev)) {
         bar_size = nvme_mbar_size(n->base.num_queues, 0, NULL, NULL);
-        memory_region_init_io(&n->base.iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
+        memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
                               bar_size);
         pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY |
-                         PCI_BASE_ADDRESS_MEM_TYPE_64, &n->base.iomem);
+                         PCI_BASE_ADDRESS_MEM_TYPE_64, &n->iomem);
         ret = msix_init_exclusive_bar(pci_dev, n->base.params.msix_qsize, 4, errp);
     } else {
         assert(n->base.params.msix_qsize >= 1);
@@ -8856,7 +8860,7 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
                                       &msix_pba_offset);
         } else {
             NvmeCtrl *pn = NVME(pcie_sriov_get_pf(pci_dev));
-            NvmePriCtrlCap *cap = &pn->base.pri_ctrl_cap;
+            NvmePriCtrlCap *cap = &pn->pri_ctrl_cap;
 
             nr_vectors = le16_to_cpu(cap->vifrsm);
             bar_size = nvme_mbar_size(le16_to_cpu(cap->vqfrsm), nr_vectors,
@@ -8864,9 +8868,9 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
         }
 
         memory_region_init(&n->base.bar0, OBJECT(n), "nvme-bar0", bar_size);
-        memory_region_init_io(&n->base.iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
+        memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
                               msix_table_offset);
-        memory_region_add_subregion(&n->base.bar0, 0, &n->base.iomem);
+        memory_region_add_subregion(&n->base.bar0, 0, &n->iomem);
 
         pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY |
                          PCI_BASE_ADDRESS_MEM_TYPE_64, &n->base.bar0);
@@ -8929,7 +8933,7 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
         nvme_init_cmb(n, pci_dev);
     }
 
-    if (n->base.pmr.dev) {
+    if (n->pmr.dev) {
         if (!nvme_init_pmr(n, pci_dev, errp)) {
             return false;
         }
@@ -8940,7 +8944,7 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
 
 static void nvme_init_subnqn(NvmeCtrl *n)
 {
-    NvmeSubsystem *subsys = n->base.subsys;
+    NvmeSubsystem *subsys = n->subsys;
     NvmeIdCtrl *id = &n->base.id_ctrl;
 
     if (!subsys) {
@@ -8960,10 +8964,10 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     uint32_t ctratt = le32_to_cpu(id->ctratt);
     uint16_t oacs;
 
-    memcpy(n->base.cse.acs, nvme_cse_acs_default, sizeof(n->base.cse.acs));
-    memcpy(n->base.cse.iocs.nvm, nvme_cse_iocs_nvm_default, sizeof(n->base.cse.iocs.nvm));
-    memcpy(n->base.cse.iocs.zoned, nvme_cse_iocs_zoned_default,
-           sizeof(n->base.cse.iocs.zoned));
+    memcpy(n->cse.acs, nvme_cse_acs_default, sizeof(n->cse.acs));
+    memcpy(n->cse.iocs.nvm, nvme_cse_iocs_nvm_default, sizeof(n->cse.iocs.nvm));
+    memcpy(n->cse.iocs.zoned, nvme_cse_iocs_zoned_default,
+           sizeof(n->cse.iocs.zoned));
 
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
@@ -8973,7 +8977,7 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
               n->base.params.firmware_version ? n->base.params.firmware_version : QEMU_VERSION, ' ');
     strpadcpy((char *)id->sn, sizeof(id->sn), n->base.params.serial, ' ');
 
-    id->cntlid = cpu_to_le16(n->base.cntlid);
+    id->cntlid = cpu_to_le16(n->cntlid);
 
     id->oaes = cpu_to_le32(NVME_OAES_NS_ATTR);
 
@@ -9004,13 +9008,13 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     if (n->base.params.dbcs) {
         oacs |= NVME_OACS_DBCS;
 
-        n->base.cse.acs[NVME_ADM_CMD_DBBUF_CONFIG] = NVME_CMD_EFF_CSUPP;
+        n->cse.acs[NVME_ADM_CMD_DBBUF_CONFIG] = NVME_CMD_EFF_CSUPP;
     }
 
     if (n->base.params.sriov_max_vfs) {
         oacs |= NVME_OACS_VMS;
 
-        n->base.cse.acs[NVME_ADM_CMD_VIRT_MNGMT] = NVME_CMD_EFF_CSUPP;
+        n->cse.acs[NVME_ADM_CMD_VIRT_MNGMT] = NVME_CMD_EFF_CSUPP;
     }
 
     id->oacs = cpu_to_le16(oacs);
@@ -9072,7 +9076,7 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     NVME_CAP_SET_CSS(cap, NVME_CAP_CSS_IOCSS);
     NVME_CAP_SET_MPSMAX(cap, 4);
     NVME_CAP_SET_CMBS(cap, n->base.params.cmb_size_mb ? 1 : 0);
-    NVME_CAP_SET_PMRS(cap, n->base.pmr.dev ? 1 : 0);
+    NVME_CAP_SET_PMRS(cap, n->pmr.dev ? 1 : 0);
     stq_le_p(&n->base.bar.cap, cap);
 
     stl_le_p(&n->base.bar.vs, NVME_SPEC_VER);
@@ -9102,9 +9106,9 @@ static bool nvme_set_migration_blockers(NvmeCtrl *n, PCIDevice *pci_dev,
      * safe to allow migration, but if there are more, then we need to block
      * migration because we don't handle this in migration code yet.
      */
-    for (int opcode = 0; opcode < ARRAY_SIZE(n->base.cse.acs); opcode++) {
+    for (int opcode = 0; opcode < ARRAY_SIZE(n->cse.acs); opcode++) {
         /* Is command supported? */
-        if (!n->base.cse.acs[opcode]) {
+        if (!n->cse.acs[opcode]) {
             continue;
         }
 
@@ -9127,7 +9131,7 @@ static bool nvme_set_migration_blockers(NvmeCtrl *n, PCIDevice *pci_dev,
         case NVME_ADM_CMD_NS_ATTACHMENT: {
             int namespaces_num = 0;
             for (int i = 1; i <= NVME_MAX_NAMESPACES; i++) {
-                NvmeNamespace *ns = nvme_subsys_ns(n->base.subsys, i);
+                NvmeNamespace *ns = nvme_subsys_ns(n->subsys, i);
                 if (!ns) {
                     continue;
                 }
@@ -9166,8 +9170,8 @@ static bool nvme_set_migration_blockers(NvmeCtrl *n, PCIDevice *pci_dev,
         }
     }
 
-    for (int opcode = 0; opcode < ARRAY_SIZE(n->base.cse.iocs.nvm); opcode++) {
-        if (!n->base.cse.iocs.nvm[opcode]) {
+    for (int opcode = 0; opcode < ARRAY_SIZE(n->cse.iocs.nvm); opcode++) {
+        if (!n->cse.iocs.nvm[opcode]) {
             continue;
         }
 
@@ -9188,7 +9192,7 @@ static bool nvme_set_migration_blockers(NvmeCtrl *n, PCIDevice *pci_dev,
             }
 
             /* check for NVME_IOMS_MO_RUH_UPDATE */
-            if (n->base.subsys->params.fdp.enabled) {
+            if (n->subsys->params.fdp.enabled) {
                 g_ptr_array_add(blocker_features, (void *) "FDP");
             }
 
@@ -9200,12 +9204,12 @@ static bool nvme_set_migration_blockers(NvmeCtrl *n, PCIDevice *pci_dev,
         }
     }
 
-    for (int opcode = 0; opcode < ARRAY_SIZE(n->base.cse.iocs.zoned); opcode++) {
+    for (int opcode = 0; opcode < ARRAY_SIZE(n->cse.iocs.zoned); opcode++) {
         /*
          * If command isn't supported or we have the same command
-         * in n->base.cse.iocs.nvm, then we can skip it here.
+         * in n->cse.iocs.nvm, then we can skip it here.
          */
-        if (!n->base.cse.iocs.zoned[opcode] || n->base.cse.iocs.nvm[opcode]) {
+        if (!n->cse.iocs.zoned[opcode] || n->cse.iocs.nvm[opcode]) {
             continue;
         }
 
@@ -9218,7 +9222,7 @@ static bool nvme_set_migration_blockers(NvmeCtrl *n, PCIDevice *pci_dev,
             }
 
             for (int i = 1; i <= NVME_MAX_NAMESPACES; i++) {
-                NvmeNamespace *ns = nvme_subsys_ns(n->base.subsys, i);
+                NvmeNamespace *ns = nvme_subsys_ns(n->subsys, i);
                 if (!ns) {
                     continue;
                 }
@@ -9279,7 +9283,7 @@ static int nvme_init_subsys(NvmeCtrl *n, Error **errp)
 {
     int cntlid;
 
-    if (!n->base.subsys) {
+    if (!n->subsys) {
         DeviceState *dev = qdev_new(TYPE_NVME_SUBSYS);
 
         qdev_prop_set_string(dev, "nqn", n->base.params.serial);
@@ -9288,7 +9292,7 @@ static int nvme_init_subsys(NvmeCtrl *n, Error **errp)
             return -1;
         }
 
-        n->base.subsys = NVME_SUBSYS(dev);
+        n->subsys = NVME_SUBSYS(dev);
     } else {
         NvmeIdCtrl *id = &n->base.id_ctrl;
         uint32_t ctratt = le32_to_cpu(id->ctratt);
@@ -9298,19 +9302,19 @@ static int nvme_init_subsys(NvmeCtrl *n, Error **errp)
 
         id->endgidmax = cpu_to_le16(0x1);
 
-        if (n->base.subsys->endgrp.fdp.enabled) {
+        if (n->subsys->endgrp.fdp.enabled) {
             ctratt |= NVME_CTRATT_FDPS;
         }
 
         id->ctratt = cpu_to_le32(ctratt);
     }
 
-    cntlid = nvme_subsys_register_ctrl(&n->base, errp);
+    cntlid = nvme_subsys_register_ctrl(n, errp);
     if (cntlid < 0) {
         return -1;
     }
 
-    n->base.cntlid = cntlid;
+    n->cntlid = cntlid;
 
     return 0;
 }
@@ -9343,22 +9347,22 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
          * property object release of PF when a VF is removed from the system.
          */
         n->base.params.serial = g_strdup(pn->base.params.serial);
-        n->base.subsys = pn->base.subsys;
+        n->subsys = pn->subsys;
 
         /*
          * Assigning this link (strong link) causes an `object_unref` later in
          * `object_release_link_property`. Increment the refcount to balance
          * this out.
          */
-        object_ref(OBJECT(pn->base.subsys));
+        object_ref(OBJECT(pn->subsys));
     }
 
     if (!nvme_check_params(n, errp)) {
         return;
     }
 
-    qbus_init(&n->base.bus, sizeof(NvmeBus), TYPE_NVME_BUS, dev, dev->id);
-    qbus_set_bus_hotplug_handler(BUS(&n->base.bus));
+    qbus_init(&n->bus, sizeof(NvmeBus), TYPE_NVME_BUS, dev, dev->id);
+    qbus_set_bus_hotplug_handler(BUS(&n->bus));
 
     if (nvme_init_subsys(n, errp)) {
         return;
@@ -9374,13 +9378,13 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
         ns = &n->base.namespace;
         ns->params.nsid = 1;
         ns->ctrl = &n->base;
-        ns->subsys = n->base.subsys;
+        ns->subsys = n->subsys;
 
         if (nvme_ns_setup(ns, errp)) {
             return;
         }
 
-        n->base.subsys->namespaces[ns->params.nsid] = ns;
+        n->subsys->namespaces[ns->params.nsid] = ns;
     }
 
     if (!nvme_set_migration_blockers(n, pci_dev, errp)) {
@@ -9407,10 +9411,10 @@ static void nvme_exit(PCIDevice *pci_dev)
         pcie_sriov_pf_exit(pci_dev);
     }
 
-    nvme_subsys_unregister_ctrl(n->base.subsys, &n->base);
+    nvme_subsys_unregister_ctrl(n->subsys, n);
 
     if (!pci_is_vf(pci_dev) && n->base.params.sriov_max_vfs) {
-        g_free(n->base.sec_ctrl_list);
+        g_free(n->sec_ctrl_list);
     }
 
     g_free(n->base.cq);
@@ -9418,7 +9422,7 @@ static void nvme_exit(PCIDevice *pci_dev)
     g_free(n->base.aer_reqs);
 
     if (n->base.params.cmb_size_mb) {
-        g_free(n->base.cmb.buf);
+        g_free(n->cmb.buf);
     }
 
     /* Only one of the `spdm_socket`s below should have been setup */
@@ -9431,15 +9435,15 @@ static void nvme_exit(PCIDevice *pci_dev)
                           SPDM_TRANSPORT_TYPE_NVME);
     }
 
-    if (n->base.pmr.dev) {
-        host_memory_backend_set_mapped(n->base.pmr.dev, false);
+    if (n->pmr.dev) {
+        host_memory_backend_set_mapped(n->pmr.dev, false);
     }
 
     if (n->base.params.msix_exclusive_bar && !pci_is_vf(pci_dev)) {
         msix_uninit_exclusive_bar(pci_dev);
     } else {
         msix_uninit(pci_dev, &n->base.bar0, &n->base.bar0);
-        memory_region_del_subregion(&n->base.bar0, &n->base.iomem);
+        memory_region_del_subregion(&n->base.bar0, &n->iomem);
     }
 
     migrate_del_blocker(&n->base.migration_blocker);
@@ -9447,9 +9451,9 @@ static void nvme_exit(PCIDevice *pci_dev)
 
 static const Property nvme_props[] = {
     DEFINE_BLOCK_PROPERTIES(NvmeCtrl, base.namespace.blkconf),
-    DEFINE_PROP_LINK("pmrdev", NvmeCtrl, base.pmr.dev, TYPE_MEMORY_BACKEND,
+    DEFINE_PROP_LINK("pmrdev", NvmeCtrl, pmr.dev, TYPE_MEMORY_BACKEND,
                      HostMemoryBackend *),
-    DEFINE_PROP_LINK("subsys", NvmeCtrl, base.subsys, TYPE_NVME_SUBSYS,
+    DEFINE_PROP_LINK("subsys", NvmeCtrl, subsys, TYPE_NVME_SUBSYS,
                      NvmeSubsystem *),
     DEFINE_PROP_STRING("serial", NvmeCtrl, base.params.serial),
     DEFINE_PROP_STRING("model", NvmeCtrl, base.params.model),
@@ -9549,7 +9553,7 @@ static void nvme_sriov_post_write_config(PCIDevice *dev, uint16_t old_num_vfs)
     int i;
 
     for (i = pcie_sriov_num_vfs(dev); i < old_num_vfs; i++) {
-        sctrl = &n->base.sec_ctrl_list[i];
+        sctrl = &n->sec_ctrl_list[i];
         nvme_virt_set_state(n, le16_to_cpu(sctrl->scid), false);
     }
 }
@@ -9923,7 +9927,7 @@ static bool nvme_ctrl_pre_save(void *opaque, Error **errp)
      * QEMU NVMe changes, we may break migration without noticing it, or worse,
      * introduce silent data corruption during migration.
      */
-    if (n->base.aer_queued) {
+    if (n->aer_queued) {
         NvmeAsyncEvent *event;
 
         QTAILQ_FOREACH(event, &n->base.aer_queue, entry) {
@@ -10130,7 +10134,7 @@ static bool nvme_ctrl_post_load(void *opaque, int version_id, Error **errp)
         qemu_bh_schedule(cq->bh);
     }
 
-    if (n->base.aer_queued) {
+    if (n->aer_queued) {
         NvmeAsyncEvent *event;
 
         QTAILQ_FOREACH(event, &n->base.aer_queue, entry) {
@@ -10168,7 +10172,7 @@ static bool nvme_ctrl_post_load(void *opaque, int version_id, Error **errp)
      * This logic comes from nvme_start_ctrl().
      */
     for (i = 1; i <= NVME_MAX_NAMESPACES; i++) {
-        NvmeNamespace *ns = nvme_subsys_ns(n->base.subsys, i);
+        NvmeNamespace *ns = nvme_subsys_ns(n->subsys, i);
 
         if (!ns || (!ns->params.shared && ns->ctrl != &n->base)) {
             continue;
@@ -10226,25 +10230,25 @@ static const VMStateDescription nvme_vmstate = {
         VMSTATE_UINT8(base.outstanding_aers, NvmeCtrl),
         VMSTATE_INT32(base.irq.intx.pending, NvmeCtrl),
 
-        VMSTATE_UINT64(base.host_timestamp, NvmeCtrl),
-        VMSTATE_UINT64(base.timestamp_set_qemu_clock_ms, NvmeCtrl),
+        VMSTATE_UINT64(host_timestamp, NvmeCtrl),
+        VMSTATE_UINT64(timestamp_set_qemu_clock_ms, NvmeCtrl),
         VMSTATE_UINT64(base.starttime_ms, NvmeCtrl),
         VMSTATE_UINT16(base.temperature, NvmeCtrl),
         VMSTATE_UINT8(base.smart_critical_warning, NvmeCtrl),
 
         VMSTATE_UINT32(base.conf_msix_qsize, NvmeCtrl),
         VMSTATE_UINT32(base.conf_ioqpairs, NvmeCtrl),
-        VMSTATE_UINT64(base.dbbuf_dbs, NvmeCtrl),
-        VMSTATE_UINT64(base.dbbuf_eis, NvmeCtrl),
-        VMSTATE_BOOL(base.dbbuf_enabled, NvmeCtrl),
+        VMSTATE_UINT64(dbbuf_dbs, NvmeCtrl),
+        VMSTATE_UINT64(dbbuf_eis, NvmeCtrl),
+        VMSTATE_BOOL(dbbuf_enabled, NvmeCtrl),
 
-        VMSTATE_UINT8(base.aer_mask, NvmeCtrl),
+        VMSTATE_UINT8(aer_mask, NvmeCtrl),
         VMSTATE_VARRAY_OF_POINTER_TO_STRUCT_UINT8_ALLOC(
             base.aer_reqs, NvmeCtrl, base.outstanding_aers, 0,
             nvme_vmstate_request, NvmeRequest),
         VMSTATE_QTAILQ_V(base.aer_queue, NvmeCtrl, 1, nvme_vmstate_async_event,
                          NvmeAsyncEvent, entry),
-        VMSTATE_INT32(base.aer_queued, NvmeCtrl),
+        VMSTATE_INT32(aer_queued, NvmeCtrl),
 
         VMSTATE_STRUCT(base.namespace, NvmeCtrl, 0, nvme_vmstate_ns, NvmeNamespace),
 
@@ -10260,7 +10264,7 @@ static const VMStateDescription nvme_vmstate = {
                        nvme_vmstate_hbs, NvmeHostBehaviorSupport),
 
         VMSTATE_UINT32(base.dn, NvmeCtrl),
-        VMSTATE_STRUCT(base.atomic, NvmeCtrl, 0, nvme_vmstate_atomic, NvmeAtomic),
+        VMSTATE_STRUCT(atomic, NvmeCtrl, 0, nvme_vmstate_atomic, NvmeAtomic),
 
         VMSTATE_END_OF_LIST()
     },
@@ -10333,7 +10337,7 @@ static void nvme_ns_hot_plug(const HotplugHandler *hotplug_dev,
             nvme_attach_ns(&ctrl->base, ns);
             nvme_update_dsm_limits(ctrl, ns);
 
-            if (!test_and_set_bit(nsid, ctrl->base.changed_nsids)) {
+            if (!test_and_set_bit(nsid, ctrl->changed_nsids)) {
                 nvme_enqueue_event(ctrl, NVME_AER_TYPE_NOTICE,
                                    NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED,
                                    NVME_LOG_CHANGED_NSLIST);
@@ -10370,7 +10374,7 @@ static void nvme_ns_hot_unplug(const HotplugHandler *hotplug_dev,
         nvme_detach_ns(ctrl, ns);
         nvme_update_dsm_limits(ctrl, NULL);
 
-        if (!test_and_set_bit(nsid, ctrl->base.changed_nsids)) {
+        if (!test_and_set_bit(nsid, ctrl->changed_nsids)) {
             nvme_enqueue_event(ctrl, NVME_AER_TYPE_NOTICE,
                                NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED,
                                NVME_LOG_CHANGED_NSLIST);

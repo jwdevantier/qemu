@@ -909,7 +909,7 @@ static void nvme_ns_realize(DeviceState *dev, Error **errp)
     NvmeNamespace *ns = NVME_NS(dev);
     BusState *s = qdev_get_parent_bus(dev);
     NvmeCtrl *n = NVME(s->parent);
-    NvmeSubsystem *subsys = n->base.subsys;
+    NvmeSubsystem *subsys = n->subsys;
     uint32_t nsid = ns->params.nsid;
     int i;
 

@@ -129,9 +129,6 @@ typedef struct NvmeSubsystem {
     } params;
 } NvmeSubsystem;
 
-int nvme_subsys_register_ctrl(NvmeCtrlBase *n, Error **errp);
-void nvme_subsys_unregister_ctrl(NvmeSubsystem *subsys, NvmeCtrlBase *n);
-
 static inline NvmeCtrlBase *nvme_subsys_ctrl(NvmeSubsystem *subsys,
                                          uint32_t cntlid)
 {
@@ -607,62 +604,25 @@ typedef struct NvmeParams {
 typedef struct NvmeCtrlBase {
     PCIDevice    parent_obj;
     MemoryRegion bar0;
-    MemoryRegion iomem;
     NvmeBar      bar;
     NvmeParams   params;
-    NvmeBus      bus;
 
-    uint16_t    cntlid;
     bool        qs_created;
     uint32_t    page_size;
     uint16_t    page_bits;
     uint16_t    max_prp_ents;
     uint32_t    max_q_ents;
     uint8_t     outstanding_aers;
-    uint64_t    host_timestamp;                 /* Timestamp sent by the host */
-    uint64_t    timestamp_set_qemu_clock_ms;    /* QEMU clock time */
     uint64_t    starttime_ms;
     uint16_t    temperature;
     uint8_t     smart_critical_warning;
     uint32_t    conf_msix_qsize;
     uint32_t    conf_ioqpairs;
-    uint64_t    dbbuf_dbs;
-    uint64_t    dbbuf_eis;
-    bool        dbbuf_enabled;
 
-    struct {
-        uint32_t acs[256];
-        struct {
-            uint32_t nvm[256];
-            uint32_t zoned[256];
-        } iocs;
-    } cse;
-
-    struct {
-        MemoryRegion mem;
-        uint8_t      *buf;
-        bool         cmse;
-        hwaddr       cba;
-    } cmb;
-
-    struct {
-        HostMemoryBackend *dev;
-        bool              cmse;
-        hwaddr            cba;
-    } pmr;
-
-    uint8_t     aer_mask;
     NvmeRequest **aer_reqs;
     QTAILQ_HEAD(, NvmeAsyncEvent) aer_queue;
-    int         aer_queued;
 
     uint32_t    dmrsl;
-
-    /* Namespace ID is started with 1 so bitmap should be 1-based */
-#define NVME_CHANGED_NSID_SIZE  (NVME_MAX_NAMESPACES + 1)
-    DECLARE_BITMAP(changed_nsids, NVME_CHANGED_NSID_SIZE);
-
-    NvmeSubsystem   *subsys;
 
     NvmeNamespace   namespace;
     NvmeNamespace   *namespaces[NVME_MAX_NAMESPACES + 1];
@@ -683,15 +643,7 @@ typedef struct NvmeCtrlBase {
         NvmeHostBehaviorSupport hbs;
     } features;
 
-    NvmePriCtrlCap  pri_ctrl_cap;
-    uint32_t nr_sec_ctrls;
-    NvmeSecCtrlEntry *sec_ctrl_list;
-    struct {
-        uint16_t    vqrfap;
-        uint16_t    virfap;
-    } next_pri_ctrl_cap;    /* These override pri_ctrl_cap after reset */
     uint32_t    dn; /* Disable Normal */
-    NvmeAtomic  atomic;
 
     /* Socket mapping to SPDM over NVMe Security In/Out commands */
     int spdm_socket;
@@ -751,12 +703,6 @@ void nvme_rw_complete_cb(void *opaque, int ret);
 uint16_t nvme_map_dptr(NvmeCtrlBase *n, NvmeSg *sg, size_t len,
                        NvmeCmd *cmd);
 
-void nvme_atomic_configure_max_write_size(bool dn, uint16_t awun,
-                                          uint16_t awupf, NvmeAtomic *atomic);
-void nvme_ns_atomic_configure_boundary(bool dn, uint16_t nabsn,
-                                       uint16_t nabspf, NvmeAtomic *atomic);
-
-extern const VMStateDescription nvme_vmstate_atomic;
 extern const VMStateDescription nvme_vmstate_ns;
 
 /*
