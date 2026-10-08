@@ -441,6 +441,7 @@ static inline bool nvme_sq_full(NvmeSQueue *sq)
 {
     return (sq->tail + 1) % sq->size == sq->head;
 }
+
 static inline void nvme_inc_sq_head(NvmeSQueue *sq)
 {
     sq->head = (sq->head + 1) % sq->size;
