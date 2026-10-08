@@ -50,7 +50,7 @@ QEMU_BUILD_BUG_ON(NVME_MAX_NAMESPACES > NVME_NSID_BROADCAST - 1);
     } while (0)
 
 typedef struct NvmeCtrlBase NvmeCtrlBase;
-typedef struct NvmeNamespace NvmeNamespace;
+typedef struct NvmeNamespaceBase NvmeNamespaceBase;
 
 #define TYPE_NVME_BUS "nvme-bus"
 OBJECT_DECLARE_SIMPLE_TYPE(NvmeBus, NVME_BUS)
@@ -114,7 +114,7 @@ typedef struct NvmeSubsystem {
     char        *serial;
 
     NvmeCtrlBase       *ctrls[NVME_MAX_CONTROLLERS];
-    NvmeNamespace      *namespaces[NVME_MAX_NAMESPACES + 1];
+    NvmeNamespaceBase      *namespaces[NVME_MAX_NAMESPACES + 1];
     NvmeEnduranceGroup endgrp;
 
     struct {
@@ -143,7 +143,7 @@ static inline NvmeCtrlBase *nvme_subsys_ctrl(NvmeSubsystem *subsys,
     return subsys->ctrls[cntlid];
 }
 
-static inline NvmeNamespace *nvme_subsys_ns(NvmeSubsystem *subsys,
+static inline NvmeNamespaceBase *nvme_subsys_ns(NvmeSubsystem *subsys,
                                             uint32_t nsid)
 {
     if (!subsys || !nsid || nsid > NVME_MAX_NAMESPACES) {
@@ -152,10 +152,6 @@ static inline NvmeNamespace *nvme_subsys_ns(NvmeSubsystem *subsys,
 
     return subsys->namespaces[nsid];
 }
-
-#define TYPE_NVME_NS "nvme-ns"
-#define NVME_NS(obj) \
-    OBJECT_CHECK(NvmeNamespace, (obj), TYPE_NVME_NS)
 
 typedef struct NvmeZone {
     NvmeZoneDescr   d;
@@ -257,7 +253,7 @@ typedef struct NvmeAtomic {
  */
 #define NVME_REQ_ATOMIC_WRITE (1u << 0)
 
-typedef struct NvmeNamespace {
+typedef struct NvmeNamespaceBase {
     DeviceState  parent_obj;
     BlockConf    blkconf;
     int32_t      bootindex;
@@ -281,7 +277,7 @@ typedef struct NvmeNamespace {
         uint32_t numzrwa;
     } zns;
 
-    QTAILQ_ENTRY(NvmeNamespace) entry;
+    QTAILQ_ENTRY(NvmeNamespaceBase) entry;
 
     NvmeIdNsZoned   *id_ns_zoned;
     NvmeZone        *zone_array;
@@ -315,9 +311,9 @@ typedef struct NvmeNamespace {
     } fdp;
 
     NvmeAtomic  atomic;
-} NvmeNamespace;
+} NvmeNamespaceBase;
 
-static inline uint32_t nvme_nsid(NvmeNamespace *ns)
+static inline uint32_t nvme_nsid(NvmeNamespaceBase *ns)
 {
     if (ns) {
         return ns->params.nsid;
@@ -326,22 +322,22 @@ static inline uint32_t nvme_nsid(NvmeNamespace *ns)
     return 0;
 }
 
-static inline size_t nvme_l2b(NvmeNamespace *ns, uint64_t lba)
+static inline size_t nvme_l2b(NvmeNamespaceBase *ns, uint64_t lba)
 {
     return lba << ns->lbaf.ds;
 }
 
-static inline size_t nvme_m2b(NvmeNamespace *ns, uint64_t lba)
+static inline size_t nvme_m2b(NvmeNamespaceBase *ns, uint64_t lba)
 {
     return ns->lbaf.ms * lba;
 }
 
-static inline int64_t nvme_moff(NvmeNamespace *ns, uint64_t lba)
+static inline int64_t nvme_moff(NvmeNamespaceBase *ns, uint64_t lba)
 {
     return ns->moff + nvme_m2b(ns, lba);
 }
 
-static inline bool nvme_ns_ext(NvmeNamespace *ns)
+static inline bool nvme_ns_ext(NvmeNamespaceBase *ns)
 {
     return !!NVME_ID_NS_FLBAS_EXTENDED(ns->id_ns.flbas);
 }
@@ -356,7 +352,7 @@ static inline void nvme_set_zone_state(NvmeZone *zone, NvmeZoneState state)
     zone->d.zs = state << 4;
 }
 
-static inline uint64_t nvme_zone_rd_boundary(NvmeNamespace *ns, NvmeZone *zone)
+static inline uint64_t nvme_zone_rd_boundary(NvmeNamespaceBase *ns, NvmeZone *zone)
 {
     return zone->d.zslba + ns->zone_size;
 }
@@ -375,13 +371,13 @@ static inline bool nvme_wp_is_valid(NvmeZone *zone)
            st != NVME_ZONE_STATE_OFFLINE;
 }
 
-static inline uint8_t *nvme_get_zd_extension(NvmeNamespace *ns,
+static inline uint8_t *nvme_get_zd_extension(NvmeNamespaceBase *ns,
                                              uint32_t zone_idx)
 {
     return &ns->zd_extensions[zone_idx * ns->params.zd_extension_size];
 }
 
-static inline void nvme_aor_inc_open(NvmeNamespace *ns)
+static inline void nvme_aor_inc_open(NvmeNamespaceBase *ns)
 {
     assert(ns->nr_open_zones >= 0);
     if (ns->params.max_open_zones) {
@@ -390,7 +386,7 @@ static inline void nvme_aor_inc_open(NvmeNamespace *ns)
     }
 }
 
-static inline void nvme_aor_dec_open(NvmeNamespace *ns)
+static inline void nvme_aor_dec_open(NvmeNamespaceBase *ns)
 {
     if (ns->params.max_open_zones) {
         assert(ns->nr_open_zones > 0);
@@ -399,7 +395,7 @@ static inline void nvme_aor_dec_open(NvmeNamespace *ns)
     assert(ns->nr_open_zones >= 0);
 }
 
-static inline void nvme_aor_inc_active(NvmeNamespace *ns)
+static inline void nvme_aor_inc_active(NvmeNamespaceBase *ns)
 {
     assert(ns->nr_active_zones >= 0);
     if (ns->params.max_active_zones) {
@@ -408,7 +404,7 @@ static inline void nvme_aor_inc_active(NvmeNamespace *ns)
     }
 }
 
-static inline void nvme_aor_dec_active(NvmeNamespace *ns)
+static inline void nvme_aor_dec_active(NvmeNamespaceBase *ns)
 {
     if (ns->params.max_active_zones) {
         assert(ns->nr_active_zones > 0);
@@ -423,12 +419,6 @@ static inline void nvme_fdp_stat_inc(uint64_t *a, uint64_t b)
     uint64_t ret = *a + b;
     *a = ret < *a ? UINT64_MAX : ret;
 }
-
-void nvme_ns_init_format(NvmeNamespace *ns);
-int nvme_ns_setup(NvmeNamespace *ns, Error **errp);
-void nvme_ns_drain(NvmeNamespace *ns);
-void nvme_ns_shutdown(NvmeNamespace *ns);
-void nvme_ns_cleanup(NvmeNamespace *ns);
 
 typedef struct NvmeAsyncEvent {
     QTAILQ_ENTRY(NvmeAsyncEvent) entry;
@@ -456,7 +446,7 @@ typedef enum NvmeTxDirection {
 
 typedef struct NvmeRequest {
     struct NvmeSQueue       *sq;
-    struct NvmeNamespace    *ns;
+    struct NvmeNamespaceBase    *ns;
     BlockAIOCB              *aiocb;
     uint16_t                status;
     void                    *opaque;
@@ -624,8 +614,8 @@ typedef struct NvmeCtrlBase {
 
     uint32_t    dmrsl;
 
-    NvmeNamespace   namespace;
-    NvmeNamespace   *namespaces[NVME_MAX_NAMESPACES + 1];
+    NvmeNamespaceBase   namespace;
+    NvmeNamespaceBase   *namespaces[NVME_MAX_NAMESPACES + 1];
     uint32_t        num_queues;
     NvmeSQueue      **sq;
     NvmeCQueue      **cq;
@@ -663,7 +653,7 @@ typedef enum NvmeResetType {
     NVME_RESET_CONTROLLER = 1,
 } NvmeResetType;
 
-static inline NvmeNamespace *nvme_ns(NvmeCtrlBase *n, uint32_t nsid)
+static inline NvmeNamespaceBase *nvme_ns(NvmeCtrlBase *n, uint32_t nsid)
 {
     if (!nsid || nsid > NVME_MAX_NAMESPACES) {
         return NULL;
@@ -694,12 +684,6 @@ static inline uint16_t nvme_cid(NvmeRequest *req)
     return le16_to_cpu(req->cqe.cid);
 }
 
-void nvme_attach_ns(NvmeCtrlBase *n, NvmeNamespace *ns);
-uint16_t nvme_bounce_data(NvmeCtrlBase *n, void *ptr, uint32_t len,
-                          NvmeTxDirection dir, NvmeRequest *req);
-uint16_t nvme_bounce_mdata(NvmeCtrlBase *n, void *ptr, uint32_t len,
-                           NvmeTxDirection dir, NvmeRequest *req);
-void nvme_rw_complete_cb(void *opaque, int ret);
 uint16_t nvme_map_dptr(NvmeCtrlBase *n, NvmeSg *sg, size_t len,
                        NvmeCmd *cmd);
 

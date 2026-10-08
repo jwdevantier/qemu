@@ -78,6 +78,53 @@ typedef struct NvmeCtrl {
 } NvmeCtrl;
 
 /*
+ * NVM Express namespace device (test device only). The prod device uses
+ * the shared NvmeNamespaceBase state directly; only the test device
+ * instantiates the "nvme-ns" qdev type.
+ */
+#define TYPE_NVME_NS "nvme-ns"
+#define NVME_NS(obj) \
+    OBJECT_CHECK(NvmeNamespace, (obj), TYPE_NVME_NS)
+
+typedef struct NvmeNamespace {
+    /*
+     * Currently a wrapper holding the shared state: all namespace state
+     * lives in the base. The next commit moves test device fields out
+     * of NvmeNamespaceBase and into this structure.
+     */
+    NvmeNamespaceBase base;
+} NvmeNamespace;
+
+/*
+ * Recover the test namespace from a base pointer.
+ */
+static inline NvmeNamespace *nvme_ns_of(NvmeNamespaceBase *ns)
+{
+    return container_of(ns, NvmeNamespace, base);
+}
+
+/*
+ * Namespace lifecycle (test device implementation; called from test/
+ * device code only).
+ */
+void nvme_ns_init_format(NvmeNamespace *ns);
+int nvme_ns_setup(NvmeNamespace *ns, Error **errp);
+void nvme_ns_drain(NvmeNamespace *ns);
+void nvme_ns_shutdown(NvmeNamespace *ns);
+void nvme_ns_cleanup(NvmeNamespace *ns);
+void nvme_attach_ns(NvmeCtrl *n, NvmeNamespace *ns);
+
+/*
+ * Bounce buffer fallbacks and rw completion (test device only; core
+ * uses the base-typed ops/dma paths directly).
+ */
+uint16_t nvme_bounce_data(NvmeCtrlBase *n, void *ptr, uint32_t len,
+                          NvmeTxDirection dir, NvmeRequest *req);
+uint16_t nvme_bounce_mdata(NvmeCtrlBase *n, void *ptr, uint32_t len,
+                           NvmeTxDirection dir, NvmeRequest *req);
+void nvme_rw_complete_cb(void *opaque, int ret);
+
+/*
  * NVM subsystem controller registration (test device only).
  */
 int nvme_subsys_register_ctrl(NvmeCtrl *n, Error **errp);

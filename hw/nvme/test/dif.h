@@ -172,7 +172,7 @@ static const uint64_t crc64_nvme_table[] = {
 
 static inline size_t nvme_pi_tuple_size(NvmeNamespace *ns)
 {
-    return ns->pif ? 16 : 8;
+    return ns->base.pif ? 16 : 8;
 }
 
 uint16_t nvme_check_prinfo(NvmeNamespace *ns, uint8_t prinfo, uint64_t slba,
