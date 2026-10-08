@@ -6449,8 +6449,8 @@ static uint16_t nvme_admin_cmd_ext(NvmeCtrlBase *bn, NvmeRequest *req)
     return NVME_INVALID_OPCODE | NVME_DNR;
 }
 
-static int nvme_atomic_boundary_check(NvmeCtrl *n, NvmeCmd *cmd,
-    NvmeAtomic *atomic)
+static bool nvme_atomic_boundary_check(NvmeCtrl *n, NvmeCmd *cmd,
+                                       NvmeAtomic *atomic)
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
 
@@ -6461,7 +6461,7 @@ static int nvme_atomic_boundary_check(NvmeCtrl *n, NvmeCmd *cmd,
         uint64_t imask;
 
         if ((slba < atomic->atomic_nabo) || (elba < atomic->atomic_nabo)) {
-            return 0;
+            return false;
         }
 
         /* Update slba/elba based on boundary offset */
@@ -6476,13 +6476,16 @@ static int nvme_atomic_boundary_check(NvmeCtrl *n, NvmeCmd *cmd,
              */
             if (n->atomic.atomic_max_write_size &&
                 ((nlb + 1) <= n->atomic.atomic_max_write_size)) {
-                return 1;
+                return true;
             }
-            return 0;
+
+            return false;
         }
     }
-    return 1;
+
+    return true;
 }
+
 #define NVME_ATOMIC_NO_START        0
 #define NVME_ATOMIC_START_ATOMIC    1
 #define NVME_ATOMIC_START_NONATOMIC 2
