@@ -196,7 +196,7 @@ void nvme_init_cq_common(NvmeCQueue *cq)
         cq->ei_addr = n->dbbuf_eis + (cq->cqid << 3) + (1 << 2);
     }
 
-    if (n->dbbuf_enabled && cq->cqid != 0) {
+    if (n->dbbuf_enabled) {
         assert(n->db_region);
         nvme_cq_init_notifier(cq);
     }
@@ -490,7 +490,7 @@ void nvme_init_sq_common(NvmeSQueue *sq)
         sq->ei_addr = n->dbbuf_eis + (sq->sqid << 3);
     }
 
-    if (n->dbbuf_enabled && sq->sqid != 0) {
+    if (n->dbbuf_enabled) {
         assert(n->db_region);
         nvme_sq_init_notifier(sq);
     }
@@ -785,9 +785,8 @@ uint16_t nvme_dbbuf_config(NvmeCtrlBase *n, const NvmeRequest *req)
             stl_le_pci_dma(pci, sq->db_addr, sq->tail,
                            MEMTXATTRS_UNSPECIFIED);
 
-            if (i != 0) {
-                nvme_sq_init_notifier(sq);
-            }
+            nvme_sq_init_notifier(sq);
+            nvme_sq_set_eventidx(sq);
         }
 
         if (cq) {
@@ -797,9 +796,8 @@ uint16_t nvme_dbbuf_config(NvmeCtrlBase *n, const NvmeRequest *req)
             stl_le_pci_dma(pci, cq->db_addr, cq->head,
                            MEMTXATTRS_UNSPECIFIED);
 
-            if (i != 0) {
-                nvme_cq_init_notifier(cq);
-            }
+            nvme_cq_init_notifier(cq);
+            nvme_cq_set_eventidx(cq);
         }
     }
 
@@ -850,9 +848,17 @@ static void nvme_cq_init_notifier(NvmeCQueue *cq)
     }
 
     event_notifier_set_handler(&cq->notifier, nvme_cq_notifier);
-    memory_region_add_eventfd(n->db_region,
-                              NVME_MAX_DB + offset, 4, false, 0,
-                              &cq->notifier);
+
+    /*
+     * We cannot rely on ioeventfd for the admin queue. Some drivers (notably,
+     * Linux) only updates the shadow doorbell for I/O queues, so we have to
+     * reply on mmio traps.
+     */
+    if (cq->cqid) {
+        memory_region_add_eventfd(n->db_region,
+                                  NVME_MAX_DB + offset, 4, false, 0,
+                                  &cq->notifier);
+    }
 }
 
 static void nvme_cq_teardown_notifier(NvmeCQueue *cq)
@@ -860,10 +866,13 @@ static void nvme_cq_teardown_notifier(NvmeCQueue *cq)
     NvmeCtrlBase *n = cq->ctrl;
     uint16_t offset = (cq->cqid << 3) + (1 << 2);
 
-    if (cq->cqid && cq->notifier.initialized) {
-        memory_region_del_eventfd(n->db_region,
-                                  NVME_MAX_DB + offset, 4, false, 0,
-                                  &cq->notifier);
+    if (cq->notifier.initialized) {
+        if (cq->cqid) {
+            memory_region_del_eventfd(n->db_region,
+                                      NVME_MAX_DB + offset, 4, false, 0,
+                                      &cq->notifier);
+        }
+
         event_notifier_set_handler(&cq->notifier, NULL);
         event_notifier_cleanup(&cq->notifier);
     }
@@ -925,9 +934,17 @@ static void nvme_sq_init_notifier(NvmeSQueue *sq)
     }
 
     event_notifier_set_handler(&sq->notifier, nvme_sq_notifier);
-    memory_region_add_eventfd(n->db_region,
-                              NVME_MAX_DB + offset, 4, false, 0,
-                              &sq->notifier);
+
+    /*
+     * We cannot rely on ioeventfd for the admin queue. Some drivers (notably,
+     * Linux) only updates the shadow doorbell for I/O queues, so we have to
+     * reply on mmio traps.
+     */
+    if (sq->sqid) {
+        memory_region_add_eventfd(n->db_region,
+                                  NVME_MAX_DB + offset, 4, false, 0,
+                                  &sq->notifier);
+    }
 }
 
 static void nvme_sq_teardown_notifier(NvmeSQueue *sq)
@@ -935,10 +952,13 @@ static void nvme_sq_teardown_notifier(NvmeSQueue *sq)
     NvmeCtrlBase *n = sq->ctrl;
     uint16_t offset = sq->sqid << 3;
 
-    if (sq->sqid && sq->notifier.initialized) {
-        memory_region_del_eventfd(n->db_region,
-                                  NVME_MAX_DB + offset, 4, false, 0,
-                                  &sq->notifier);
+    if (sq->notifier.initialized) {
+        if (sq->sqid) {
+            memory_region_del_eventfd(n->db_region,
+                                      NVME_MAX_DB + offset, 4, false, 0,
+                                      &sq->notifier);
+        }
+
         event_notifier_set_handler(&sq->notifier, NULL);
         event_notifier_cleanup(&sq->notifier);
     }

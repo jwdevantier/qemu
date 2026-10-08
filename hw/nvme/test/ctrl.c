@@ -7235,10 +7235,16 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
             qemu_bh_schedule(cq->bh);
         }
 
-        cq->head = new_head;
         if (!qid && n->base.dbbuf_enabled) {
-            stl_le_pci_dma(pci, cq->db_addr, cq->head, MEMTXATTRS_UNSPECIFIED);
+            stl_le_pci_dma(pci, cq->db_addr, new_head,
+                           MEMTXATTRS_UNSPECIFIED);
+
+            event_notifier_set(&cq->notifier);
+
+            return;
         }
+
+        cq->head = new_head;
 
         nvme_cq_kick(cq);
     } else {
@@ -7281,7 +7287,6 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
 
         trace_pci_nvme_mmio_doorbell_sq(sq->sqid, new_tail);
 
-        sq->tail = new_tail;
         if (!qid && n->base.dbbuf_enabled) {
             /*
              * The spec states "the host shall also update the controller's
@@ -7296,8 +7301,15 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
              * including ones that run on Linux, are not updating Admin Queues,
              * so we can't trust reading it for an appropriate sq tail.
              */
-            stl_le_pci_dma(pci, sq->db_addr, sq->tail, MEMTXATTRS_UNSPECIFIED);
+            stl_le_pci_dma(pci, sq->db_addr, new_tail,
+                           MEMTXATTRS_UNSPECIFIED);
+
+            event_notifier_set(&sq->notifier);
+
+            return;
         }
+
+        sq->tail = new_tail;
 
         qemu_bh_schedule(sq->bh);
     }

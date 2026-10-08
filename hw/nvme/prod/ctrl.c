@@ -750,14 +750,26 @@ static void vnvme_process_db(VnvmeCtrl *n, hwaddr offset, uint32_t val)
     if (offset == NVME_MAX_DB + 0x0) {
         NvmeSQueue *sq = &n->admin_sq;
         trace_pci_nvme_mmio_doorbell_sq(0, val & 0xffff);
+        if (n->dbbuf_enabled) {
+            /*
+             * Keep the shadow doorbell in sync with this MMIO write and
+             * kick the processing through the event notifier; the
+             * notifier handler re-reads the tail from the shadow
+             * buffer.
+             */
+            stl_le_pci_dma(PCI_DEVICE(n), sq->db_addr, val & (sq->size - 1),
+                           MEMTXATTRS_UNSPECIFIED);
+
+            if (NVME_CSTS_RDY(le32_to_cpu(n->bar.csts))) {
+                event_notifier_set(&sq->notifier);
+            }
+
+            return;
+        }
+
         sq->tail = val & (sq->size - 1);
         if (NVME_CSTS_RDY(le32_to_cpu(n->bar.csts))) {
             qemu_bh_schedule(sq->bh);
-        }
-        if (n->dbbuf_enabled) {
-            /* keep the shadow doorbell in sync with this MMIO write */
-            stl_le_pci_dma(PCI_DEVICE(n), sq->db_addr, sq->tail,
-                           MEMTXATTRS_UNSPECIFIED);
         }
         return;
     }
@@ -769,12 +781,22 @@ static void vnvme_process_db(VnvmeCtrl *n, hwaddr offset, uint32_t val)
         if (nvme_cq_full(cq)) {
             qemu_bh_schedule(cq->bh);
         }
-        cq->head = val & (cq->size - 1);
         if (n->dbbuf_enabled) {
-            /* keep the shadow doorbell in sync with this MMIO write */
-            stl_le_pci_dma(PCI_DEVICE(n), cq->db_addr, cq->head,
+            /*
+             * Keep the shadow doorbell in sync with this MMIO write and
+             * kick the processing through the event notifier; the
+             * notifier handler re-reads the head from the shadow
+             * buffer.
+             */
+            stl_le_pci_dma(PCI_DEVICE(n), cq->db_addr, val & (cq->size - 1),
                            MEMTXATTRS_UNSPECIFIED);
+
+            event_notifier_set(&cq->notifier);
+
+            return;
         }
+
+        cq->head = val & (cq->size - 1);
         nvme_cq_kick(cq);
         return;
     }
