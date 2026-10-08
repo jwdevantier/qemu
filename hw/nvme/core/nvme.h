@@ -18,12 +18,10 @@
 #ifndef HW_NVME_NVME_H
 #define HW_NVME_NVME_H
 
-#include "qemu/uuid.h"
 #include "qemu/log.h"
 #include "qemu/aiocb.h"
 #include "hw/pci/pci_device.h"
 #include "hw/block/block.h"
-#include "system/hostmem.h"
 
 #include "block/nvme.h"
 
@@ -155,15 +153,6 @@ typedef struct NvmeRequest {
      */
 } NvmeRequest;
 
-typedef struct NvmeBounceContext {
-    NvmeRequest *req;
-
-    struct {
-        QEMUIOVector iov;
-        uint8_t *bounce;
-    } data, mdata;
-} NvmeBounceContext;
-
 static inline const char *nvme_adm_opc_str(uint8_t opc)
 {
     switch (opc) {
@@ -242,52 +231,23 @@ typedef struct NvmeCQueue {
     QTAILQ_HEAD(, NvmeRequest) req_list;
 } NvmeCQueue;
 
-typedef struct NvmeParams {
+/*
+ * Controller device parameters. The test device derives its own
+ * NvmeParams (see test/nvme.h) with the configurable test device
+ * parameters (cmb_size_mb, zasl, sr-iov, ...).
+ */
+typedef struct NvmeParamsBase {
     char     *serial;
-    char     *model;
-    char     *firmware_version;
-    uint32_t num_queues; /* deprecated since 5.1 */
     uint32_t max_ioqpairs;
-    uint16_t msix_qsize;
-    uint16_t mqes;
-    uint32_t cmb_size_mb;
-    uint8_t  aerl;
-    uint32_t aer_max_queued;
     uint8_t  mdts;
-    uint8_t  vsl;
-    bool     use_intel_id;
-    uint8_t  zasl;
-    bool     auto_transition_zones;
-    bool     legacy_cmb;
-    /*
-     * Deprecated: the io queue doorbell ioeventfd wiring is always
-     * attempted when a doorbell buffer is configured. Kept for
-     * command line compatibility; ignored.
-     */
-    bool     ioeventfd;
-    bool     dbcs;
-    uint16_t  sriov_max_vfs;
-    uint16_t sriov_vq_flexible;
-    uint16_t sriov_vi_flexible;
-    uint32_t  sriov_max_vq_per_vf;
-    uint32_t  sriov_max_vi_per_vf;
-    bool     msix_exclusive_bar;
-    bool     ocp;
-
-    struct {
-        bool mem;
-    } ctratt;
-
-    uint16_t atomic_awun;
-    uint16_t atomic_awupf;
-    bool     atomic_dn;
-} NvmeParams;
+    uint8_t  aerl;
+} NvmeParamsBase;
 
 typedef struct NvmeCtrlBase {
     PCIDevice    parent_obj;
     MemoryRegion bar0;
     NvmeBar      bar;
-    NvmeParams   params;
+    NvmeParamsBase params;
 
     bool        qs_created;
     uint32_t    page_size;

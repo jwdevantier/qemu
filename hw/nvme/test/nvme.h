@@ -12,7 +12,9 @@
 #ifndef HW_NVME_TEST_NVME_H
 #define HW_NVME_TEST_NVME_H
 
+#include "qemu/uuid.h"
 #include "hw/pci/pcie_sriov.h"
+#include "system/hostmem.h"
 
 #include "hw/nvme/core/nvme.h"
 
@@ -227,6 +229,47 @@ typedef struct NvmeAtomic {
 } NvmeAtomic;
 
 /*
+ * Test device controller parameters ("nvme"); the shared set (serial,
+ * max_ioqpairs, mdts, aerl) lives in NvmeParamsBase in core/nvme.h.
+ */
+typedef struct NvmeParams {
+    char     *model;
+    char     *firmware_version;
+    uint32_t num_queues; /* deprecated since 5.1 */
+    uint16_t msix_qsize;
+    uint16_t mqes;
+    uint32_t cmb_size_mb;
+    uint32_t aer_max_queued;
+    uint8_t  vsl;
+    bool     use_intel_id;
+    uint8_t  zasl;
+    bool     auto_transition_zones;
+    bool     legacy_cmb;
+    /*
+     * Deprecated: the io queue doorbell ioeventfd wiring is always
+     * attempted when a doorbell buffer is configured. Kept for
+     * command line compatibility; ignored.
+     */
+    bool     ioeventfd;
+    bool     dbcs;
+    uint16_t  sriov_max_vfs;
+    uint16_t sriov_vq_flexible;
+    uint16_t sriov_vi_flexible;
+    uint32_t  sriov_max_vq_per_vf;
+    uint32_t  sriov_max_vi_per_vf;
+    bool     msix_exclusive_bar;
+    bool     ocp;
+
+    struct {
+        bool mem;
+    } ctratt;
+
+    uint16_t atomic_awun;
+    uint16_t atomic_awupf;
+    bool     atomic_dn;
+} NvmeParams;
+
+/*
  * NVM Express namespace device (test device only). The prod device uses
  * the shared NvmeNamespaceBase state directly; only the test device
  * instantiates the "nvme-ns" qdev type.
@@ -294,6 +337,19 @@ static inline NvmeNamespace *nvme_ns_of(NvmeNamespaceBase *ns)
 {
     return container_of(ns, NvmeNamespace, base);
 }
+
+/*
+ * Bounce buffer fallbacks (test device only; prod uses the plain
+ * pci_dma data path): context used by nvme_bounce_data/mdata.
+ */
+typedef struct NvmeBounceContext {
+    NvmeRequest *req;
+
+    struct {
+        QEMUIOVector iov;
+        uint8_t *bounce;
+    } data, mdata;
+} NvmeBounceContext;
 
 /*
  * Zoned namespace helpers. These operate on the derived namespace
@@ -437,6 +493,9 @@ typedef struct NvmeCtrl {
      * state that it had before the device split.
      */
     NvmeNamespace   namespace;
+
+    /* Test device ("nvme") controller parameters. */
+    NvmeParams  params;
 
     NvmePriCtrlCap  pri_ctrl_cap;
     uint32_t nr_sec_ctrls;

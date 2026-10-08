@@ -41,7 +41,7 @@ static void nvme_subsys_unreserve_cntlids(NvmeCtrl *n)
     NvmeSecCtrlEntry *sctrl;
     int i, cntlid;
 
-    for (i = 0; i < n->base.params.sriov_max_vfs; i++) {
+    for (i = 0; i < n->params.sriov_max_vfs; i++) {
         sctrl = &list[i];
         cntlid = le16_to_cpu(sctrl->scid);
 
@@ -57,7 +57,7 @@ int nvme_subsys_register_ctrl(NvmeCtrl *n, Error **errp)
 {
     NvmeSubsystem *subsys = n->subsys;
     NvmeSecCtrlEntry *sctrl = nvme_sctrl(n);
-    int cntlid, num_rsvd, num_vfs = n->base.params.sriov_max_vfs;
+    int cntlid, num_rsvd, num_vfs = n->params.sriov_max_vfs;
 
     if (pci_is_vf(&n->base.parent_obj)) {
         cntlid = le16_to_cpu(sctrl->scid);
