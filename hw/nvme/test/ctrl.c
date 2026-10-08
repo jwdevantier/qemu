@@ -744,50 +744,6 @@ static bool nvme_nsid_valid(NvmeCtrl *n, uint32_t nsid)
         (nsid == NVME_NSID_BROADCAST || nsid <= NVME_MAX_NAMESPACES);
 }
 
-static int nvme_check_sqid(NvmeCtrl *n, uint16_t sqid)
-{
-    return sqid < n->base.conf_ioqpairs + 1 && n->base.sq[sqid] != NULL ? 0 : -1;
-}
-
-static int nvme_check_cqid(NvmeCtrl *n, uint16_t cqid)
-{
-    return cqid < n->base.conf_ioqpairs + 1 && n->base.cq[cqid] != NULL ? 0 : -1;
-}
-
-static void nvme_inc_cq_tail(NvmeCQueue *cq)
-{
-    cq->tail++;
-    if (cq->tail >= cq->size) {
-        cq->tail = 0;
-        cq->phase = !cq->phase;
-    }
-}
-
-static void nvme_inc_sq_head(NvmeSQueue *sq)
-{
-    sq->head = (sq->head + 1) % sq->size;
-}
-
-static uint8_t nvme_cq_full(NvmeCQueue *cq)
-{
-    return (cq->tail + 1) % cq->size == cq->head;
-}
-
-static uint8_t nvme_sq_empty(NvmeSQueue *sq)
-{
-    return sq->head == sq->tail;
-}
-
-static inline bool nvme_cq_empty(NvmeCQueue *cq)
-{
-    return cq->head == cq->tail;
-}
-
-static inline bool nvme_sq_full(NvmeSQueue *sq)
-{
-    return (sq->tail + 1) % sq->size == sq->head;
-}
-
 static inline bool nvme_msix_enabled(NvmeCtrl *n)
 {
     return msix_enabled(PCI_DEVICE(n));
@@ -4510,7 +4466,7 @@ static uint16_t nvme_del_sq(NvmeCtrl *n, NvmeRequest *req)
     NvmeCQueue *cq;
     uint16_t qid = le16_to_cpu(c->qid);
 
-    if (unlikely(!qid || nvme_check_sqid(n, qid))) {
+    if (unlikely(!qid || nvme_check_sqid(&n->base, qid))) {
         trace_pci_nvme_err_invalid_del_sq(qid);
         return NVME_INVALID_QID | NVME_DNR;
     }
@@ -4520,7 +4476,7 @@ static uint16_t nvme_del_sq(NvmeCtrl *n, NvmeRequest *req)
     sq = n->base.sq[qid];
     nvme_sq_cancel_inflight(sq, NVME_CMD_ABORT_SQ_DEL);
 
-    if (!nvme_check_cqid(n, sq->cqid)) {
+    if (!nvme_check_cqid(&n->base, sq->cqid)) {
         cq = n->base.cq[sq->cqid];
         QTAILQ_REMOVE(&cq->sq_list, sq, entry);
 
@@ -4616,7 +4572,7 @@ static uint16_t nvme_create_sq(NvmeCtrl *n, NvmeRequest *req)
 
     trace_pci_nvme_create_sq(prp1, sqid, cqid, qsize, qflags);
 
-    if (unlikely(!cqid || nvme_check_cqid(n, cqid))) {
+    if (unlikely(!cqid || nvme_check_cqid(&n->base, cqid))) {
         trace_pci_nvme_err_invalid_create_sq_cqid(cqid);
         return NVME_INVALID_CQID | NVME_DNR;
     }
@@ -5252,7 +5208,7 @@ static uint16_t nvme_del_cq(NvmeCtrl *n, NvmeRequest *req)
     NvmeCQueue *cq;
     uint16_t qid = le16_to_cpu(c->qid);
 
-    if (unlikely(!qid || nvme_check_cqid(n, qid))) {
+    if (unlikely(!qid || nvme_check_cqid(&n->base, qid))) {
         trace_pci_nvme_err_invalid_del_cq_cqid(qid);
         return NVME_INVALID_CQID | NVME_DNR;
     }
@@ -5891,7 +5847,7 @@ static uint16_t nvme_abort(NvmeCtrl *n, NvmeRequest *req)
     int i;
 
     req->cqe.result = 1;
-    if (nvme_check_sqid(n, sqid)) {
+    if (nvme_check_sqid(&n->base, sqid)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -8231,7 +8187,7 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
         NvmeCQueue *cq;
 
         qid = (addr - (0x1000 + (1 << 2))) >> 3;
-        if (unlikely(nvme_check_cqid(n, qid))) {
+        if (unlikely(nvme_check_cqid(&n->base, qid))) {
             NVME_GUEST_ERR(pci_nvme_ub_db_wr_invalid_cq,
                            "completion queue doorbell write"
                            " for nonexistent queue,"
@@ -8295,7 +8251,7 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
         NvmeSQueue *sq;
 
         qid = (addr - 0x1000) >> 3;
-        if (unlikely(nvme_check_sqid(n, qid))) {
+        if (unlikely(nvme_check_sqid(&n->base, qid))) {
             NVME_GUEST_ERR(pci_nvme_ub_db_wr_invalid_sq,
                            "submission queue doorbell write"
                            " for nonexistent queue,"
@@ -10092,7 +10048,7 @@ static bool nvme_ctrl_post_load(void *opaque, int version_id, Error **errp)
             NvmeRequest *req;
             NvmeSQueue *sq;
 
-            assert(!nvme_check_sqid(n, sqid));
+            assert(!nvme_check_sqid(&n->base, sqid));
             sq = n->base.sq[sqid];
 
             req = QTAILQ_FIRST(&sq->req_list);

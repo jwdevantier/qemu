@@ -305,6 +305,58 @@ typedef enum NvmeResetType {
     NVME_RESET_CONTROLLER = 1,
 } NvmeResetType;
 
+/*
+ * Queue mechanics shared by both devices.
+ *
+ * Note that the queue id checks use conf_ioqpairs (the currently
+ * negotiated queue count), not the allocated num_queues: the test
+ * device can shrink conf_ioqpairs via Set Features (NUMBER_OF_QUEUES
+ * negotiation, secondary controller takeover).
+ */
+static inline bool nvme_sq_empty(NvmeSQueue *sq)
+{
+    return sq->head == sq->tail;
+}
+
+static inline bool nvme_cq_full(NvmeCQueue *cq)
+{
+    return (cq->tail + 1) % cq->size == cq->head;
+}
+
+static inline bool nvme_cq_empty(NvmeCQueue *cq)
+{
+    return cq->head == cq->tail;
+}
+
+static inline bool nvme_sq_full(NvmeSQueue *sq)
+{
+    return (sq->tail + 1) % sq->size == sq->head;
+}
+
+static inline void nvme_inc_sq_head(NvmeSQueue *sq)
+{
+    sq->head = (sq->head + 1) % sq->size;
+}
+
+static inline void nvme_inc_cq_tail(NvmeCQueue *cq)
+{
+    cq->tail++;
+    if (cq->tail >= cq->size) {
+        cq->tail = 0;
+        cq->phase = !cq->phase;
+    }
+}
+
+static inline bool nvme_check_sqid(NvmeCtrlBase *n, uint16_t sqid)
+{
+    return sqid > n->conf_ioqpairs || !n->sq[sqid];
+}
+
+static inline bool nvme_check_cqid(NvmeCtrlBase *n, uint16_t cqid)
+{
+    return cqid > n->conf_ioqpairs || !n->cq[cqid];
+}
+
 static inline NvmeNamespaceBase *nvme_ns(NvmeCtrlBase *n, uint32_t nsid)
 {
     if (!nsid || nsid > NVME_MAX_NAMESPACES) {
