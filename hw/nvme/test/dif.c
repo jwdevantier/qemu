@@ -19,7 +19,7 @@
 uint16_t nvme_check_prinfo(NvmeNamespace *ns, uint8_t prinfo, uint64_t slba,
                            uint64_t reftag)
 {
-    uint64_t mask = ns->base.pif ? 0xffffffffffff : 0xffffffff;
+    uint64_t mask = ns->pif ? 0xffffffffffff : 0xffffffff;
 
     if ((NVME_ID_NS_DPS_TYPE(ns->base.id_ns.dps) == NVME_ID_NS_DPS_TYPE_1) &&
         (prinfo & NVME_PRINFO_PRCHK_REF) && (slba & mask) != reftag) {
@@ -138,7 +138,7 @@ void nvme_dif_pract_generate_dif(NvmeNamespace *ns, uint8_t *buf, size_t len,
                                  uint8_t *mbuf, size_t mlen, uint16_t apptag,
                                  uint64_t *reftag)
 {
-    switch (ns->base.pif) {
+    switch (ns->pif) {
     case NVME_PI_GUARD_16:
         return nvme_dif_pract_generate_dif_crc16(ns, buf, len, mbuf, mlen,
                                                  apptag, reftag);
@@ -281,7 +281,7 @@ static uint16_t nvme_dif_prchk(NvmeNamespace *ns, NvmeDifTuple *dif,
                                uint8_t prinfo, uint16_t apptag,
                                uint16_t appmask, uint64_t reftag)
 {
-    switch (ns->base.pif) {
+    switch (ns->pif) {
     case NVME_PI_GUARD_16:
         return nvme_dif_prchk_crc16(ns, dif, buf, mbuf, pil, prinfo, apptag,
                                     appmask, reftag);
@@ -592,7 +592,7 @@ uint16_t nvme_dif_rw(NvmeCtrl *n, NvmeRequest *req)
             for (; mbuf < end; mbuf += ns->base.lbaf.ms) {
                 NvmeDifTuple *dif = (NvmeDifTuple *)(mbuf + pil);
 
-                switch (ns->base.pif) {
+                switch (ns->pif) {
                 case NVME_PI_GUARD_16:
                     dif->g16.apptag = cpu_to_be16(apptag);
                     dif->g16.reftag = cpu_to_be32(reftag);

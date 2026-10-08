@@ -29,9 +29,6 @@
 
 #define NVME_MAX_CONTROLLERS 256
 #define NVME_MAX_NAMESPACES  256
-#define NVME_EUI64_DEFAULT ((uint64_t)0x5254000000000000)
-#define NVME_FDP_MAX_EVENTS 63
-#define NVME_FDP_MAXPIDS 128
 
 /*
  * The controller only supports Submission and Completion Queue Entry Sizes of
@@ -52,265 +49,39 @@ QEMU_BUILD_BUG_ON(NVME_MAX_NAMESPACES > NVME_NSID_BROADCAST - 1);
 typedef struct NvmeCtrlBase NvmeCtrlBase;
 typedef struct NvmeNamespaceBase NvmeNamespaceBase;
 
-#define TYPE_NVME_BUS "nvme-bus"
-OBJECT_DECLARE_SIMPLE_TYPE(NvmeBus, NVME_BUS)
-
-typedef struct NvmeBus {
-    BusState parent_bus;
-} NvmeBus;
-
-#define TYPE_NVME_SUBSYS "nvme-subsys"
-#define NVME_SUBSYS(obj) \
-    OBJECT_CHECK(NvmeSubsystem, (obj), TYPE_NVME_SUBSYS)
-#define SUBSYS_SLOT_RSVD (void *)0xFFFF
-
-typedef struct NvmeReclaimUnit {
-    uint64_t ruamw;
-} NvmeReclaimUnit;
-
-typedef struct NvmeRuHandle {
-    uint8_t  ruht;
-    uint8_t  ruha;
-    uint64_t event_filter;
-    uint8_t  lbafi;
-    uint64_t ruamw;
-
-    /* reclaim units indexed by reclaim group */
-    NvmeReclaimUnit *rus;
-} NvmeRuHandle;
-
-typedef struct NvmeFdpEventBuffer {
-    NvmeFdpEvent     events[NVME_FDP_MAX_EVENTS];
-    unsigned int     nelems;
-    unsigned int     start;
-    unsigned int     next;
-} NvmeFdpEventBuffer;
-
-typedef struct NvmeEnduranceGroup {
-    uint8_t event_conf;
-
-    struct {
-        NvmeFdpEventBuffer host_events, ctrl_events;
-
-        uint16_t nruh;
-        uint16_t nrg;
-        uint8_t  rgif;
-        uint64_t runs;
-
-        uint64_t hbmw;
-        uint64_t mbmw;
-        uint64_t mbe;
-
-        bool enabled;
-
-        NvmeRuHandle *ruhs;
-    } fdp;
-} NvmeEnduranceGroup;
-
-typedef struct NvmeSubsystem {
-    DeviceState parent_obj;
-    NvmeBus     bus;
-    uint8_t     subnqn[256];
-    char        *serial;
-
-    NvmeCtrlBase       *ctrls[NVME_MAX_CONTROLLERS];
-    NvmeNamespaceBase      *namespaces[NVME_MAX_NAMESPACES + 1];
-    NvmeEnduranceGroup endgrp;
-
-    struct {
-        char *nqn;
-
-        struct {
-            bool     enabled;
-            uint64_t runs;
-            uint16_t nruh;
-            uint32_t nrg;
-        } fdp;
-    } params;
-} NvmeSubsystem;
-
-static inline NvmeCtrlBase *nvme_subsys_ctrl(NvmeSubsystem *subsys,
-                                         uint32_t cntlid)
-{
-    if (!subsys || cntlid >= NVME_MAX_CONTROLLERS) {
-        return NULL;
-    }
-
-    if (subsys->ctrls[cntlid] == SUBSYS_SLOT_RSVD) {
-        return NULL;
-    }
-
-    return subsys->ctrls[cntlid];
-}
-
-static inline NvmeNamespaceBase *nvme_subsys_ns(NvmeSubsystem *subsys,
-                                            uint32_t nsid)
-{
-    if (!subsys || !nsid || nsid > NVME_MAX_NAMESPACES) {
-        return NULL;
-    }
-
-    return subsys->namespaces[nsid];
-}
-
-typedef struct NvmeZone {
-    NvmeZoneDescr   d;
-    uint64_t        w_ptr;
-    QTAILQ_ENTRY(NvmeZone) entry;
-} NvmeZone;
-
-#define FDP_EVT_MAX 0xff
-#define NVME_FDP_MAX_NS_RUHS 32u
-#define FDPVSS 0
+/*
+ * Namespace device parameters: the base carries only the "legacy"
+ * (drive-backed, controller-embedded) namespace with nsid 1. The
+ * test device defines its own NvmeNamespaceParams (see test/nvme.h)
+ * with the configurable namespace parameters (zoned, FDP, DIF, ...).
+ */
+typedef struct NvmeNamespaceParamsBase {
+    uint32_t    nsid;
+} NvmeNamespaceParamsBase;
 
 /*
- * NOTE: Apart from event type 0, any event type with a shift value of 0 is
- * considered unsupported and thus skipped in get/set features calls.
- *
- * NOTE: NvmeRuHandle uses a 64bit event mask - refactor to support event types
- *       of 63 or greater.
+ * The shared namespace state: block configuration, geometry and the
+ * Identify Namespace structure. The test device extends this into
+ * NvmeNamespace (see test/nvme.h) with the namespace features (zoned,
+ * FDP, DIF, atomic writes).
  */
-static const uint8_t nvme_fdp_evf_shifts[FDP_EVT_MAX + 1] = {
-    /* Host events */
-    [FDP_EVT_RU_NOT_FULLY_WRITTEN]      = 0,
-    [FDP_EVT_RU_ATL_EXCEEDED]           = 1,
-    [FDP_EVT_CTRL_RESET_RUH]            = 2,
-    [FDP_EVT_INVALID_PID]               = 3,
-    /* CTRL events */
-    [FDP_EVT_MEDIA_REALLOC]             = 32,
-    [FDP_EVT_RUH_IMPLICIT_RU_CHANGE]    = 33,
-};
-
-#define NGUID_LEN 16
-
-typedef struct {
-    uint8_t data[NGUID_LEN];
-} NvmeNGUID;
-
-bool nvme_nguid_is_null(const NvmeNGUID *nguid);
-
-extern const PropertyInfo qdev_prop_nguid;
-
-#define DEFINE_PROP_NGUID_NODEFAULT(_name, _state, _field) \
-    DEFINE_PROP(_name, _state, _field, qdev_prop_nguid, NvmeNGUID)
-
-typedef struct NvmeNamespaceParams {
-    bool      detached;
-    bool      shared;
-    uint32_t  nsid;
-    QemuUUID  uuid;
-    NvmeNGUID nguid;
-    uint64_t  eui64;
-    bool      eui64_default;
-
-    uint16_t ms;
-    uint8_t  mset;
-    uint8_t  pi;
-    uint8_t  pil;
-    uint8_t  pif;
-
-    uint16_t mssrl;
-    uint32_t mcl;
-    uint8_t  msrc;
-
-    bool     zoned;
-    bool     cross_zone_read;
-    uint64_t zone_size_bs;
-    uint64_t zone_cap_bs;
-    uint32_t max_active_zones;
-    uint32_t max_open_zones;
-    uint32_t zd_extension_size;
-
-    uint32_t numzrwa;
-    uint64_t zrwas;
-    uint64_t zrwafg;
-
-    struct {
-        char *ruhs;
-    } fdp;
-
-    struct {
-        uint16_t nawun;
-        uint16_t nawupf;
-        uint16_t nabsn;
-        uint16_t nabspf;
-        uint16_t nabo;
-    } atomic;
-} NvmeNamespaceParams;
-
-typedef struct NvmeAtomic {
-    uint32_t    atomic_max_write_size;
-    uint64_t    atomic_boundary;
-    uint64_t    atomic_nabo;
-    bool        atomic_writes;
-} NvmeAtomic;
-
-/*
- * Device-defined NvmeRequest flag bits (NvmeRequest.flags):
- * this device sets NVME_REQ_ATOMIC_WRITE on write commands that are
- * part of an atomic write sequence and must not overlap other
- * in-flight commands.
- */
-#define NVME_REQ_ATOMIC_WRITE (1u << 0)
-
 typedef struct NvmeNamespaceBase {
     DeviceState  parent_obj;
     BlockConf    blkconf;
-    int32_t      bootindex;
-    char         bootindex_suffix[24];
     int64_t      size;
     int64_t      moff;
     NvmeIdNs     id_ns;
-    NvmeIdNsNvm  id_ns_nvm;
-    NvmeIdNsInd  id_ns_ind;
     NvmeLBAF     lbaf;
     unsigned int nlbaf;
     size_t       lbasz;
     uint8_t      csi;
     uint16_t     status;
     int          attached;
-    uint8_t      pif;
 
-    struct {
-        uint16_t zrwas;
-        uint16_t zrwafg;
-        uint32_t numzrwa;
-    } zns;
-
-    QTAILQ_ENTRY(NvmeNamespaceBase) entry;
-
-    NvmeIdNsZoned   *id_ns_zoned;
-    NvmeZone        *zone_array;
-    QTAILQ_HEAD(, NvmeZone) exp_open_zones;
-    QTAILQ_HEAD(, NvmeZone) imp_open_zones;
-    QTAILQ_HEAD(, NvmeZone) closed_zones;
-    QTAILQ_HEAD(, NvmeZone) full_zones;
-    uint32_t        num_zones;
-    uint64_t        zone_size;
-    uint64_t        zone_capacity;
-    uint32_t        zone_size_log2;
-    uint8_t         *zd_extensions;
-    int32_t         nr_open_zones;
-    int32_t         nr_active_zones;
-
-    NvmeNamespaceParams params;
-    NvmeSubsystem *subsys;
-    NvmeEnduranceGroup *endgrp;
+    NvmeNamespaceParamsBase params;
 
     /* NULL for shared namespaces; set to specific controller if private */
     NvmeCtrlBase *ctrl;
-
-    struct {
-        uint32_t err_rec;
-    } features;
-
-    struct {
-        uint16_t nphs;
-        /* reclaim unit handle identifiers indexed by placement handle */
-        uint16_t *phs;
-    } fdp;
-
-    NvmeAtomic  atomic;
 } NvmeNamespaceBase;
 
 static inline uint32_t nvme_nsid(NvmeNamespaceBase *ns)
@@ -341,85 +112,6 @@ static inline bool nvme_ns_ext(NvmeNamespaceBase *ns)
 {
     return !!NVME_ID_NS_FLBAS_EXTENDED(ns->id_ns.flbas);
 }
-
-static inline NvmeZoneState nvme_get_zone_state(NvmeZone *zone)
-{
-    return zone->d.zs >> 4;
-}
-
-static inline void nvme_set_zone_state(NvmeZone *zone, NvmeZoneState state)
-{
-    zone->d.zs = state << 4;
-}
-
-static inline uint64_t nvme_zone_rd_boundary(NvmeNamespaceBase *ns, NvmeZone *zone)
-{
-    return zone->d.zslba + ns->zone_size;
-}
-
-static inline uint64_t nvme_zone_wr_boundary(NvmeZone *zone)
-{
-    return zone->d.zslba + zone->d.zcap;
-}
-
-static inline bool nvme_wp_is_valid(NvmeZone *zone)
-{
-    uint8_t st = nvme_get_zone_state(zone);
-
-    return st != NVME_ZONE_STATE_FULL &&
-           st != NVME_ZONE_STATE_READ_ONLY &&
-           st != NVME_ZONE_STATE_OFFLINE;
-}
-
-static inline uint8_t *nvme_get_zd_extension(NvmeNamespaceBase *ns,
-                                             uint32_t zone_idx)
-{
-    return &ns->zd_extensions[zone_idx * ns->params.zd_extension_size];
-}
-
-static inline void nvme_aor_inc_open(NvmeNamespaceBase *ns)
-{
-    assert(ns->nr_open_zones >= 0);
-    if (ns->params.max_open_zones) {
-        ns->nr_open_zones++;
-        assert(ns->nr_open_zones <= ns->params.max_open_zones);
-    }
-}
-
-static inline void nvme_aor_dec_open(NvmeNamespaceBase *ns)
-{
-    if (ns->params.max_open_zones) {
-        assert(ns->nr_open_zones > 0);
-        ns->nr_open_zones--;
-    }
-    assert(ns->nr_open_zones >= 0);
-}
-
-static inline void nvme_aor_inc_active(NvmeNamespaceBase *ns)
-{
-    assert(ns->nr_active_zones >= 0);
-    if (ns->params.max_active_zones) {
-        ns->nr_active_zones++;
-        assert(ns->nr_active_zones <= ns->params.max_active_zones);
-    }
-}
-
-static inline void nvme_aor_dec_active(NvmeNamespaceBase *ns)
-{
-    if (ns->params.max_active_zones) {
-        assert(ns->nr_active_zones > 0);
-        ns->nr_active_zones--;
-        assert(ns->nr_active_zones >= ns->nr_open_zones);
-    }
-    assert(ns->nr_active_zones >= 0);
-}
-
-static inline void nvme_fdp_stat_inc(uint64_t *a, uint64_t b)
-{
-    uint64_t ret = *a + b;
-    *a = ret < *a ? UINT64_MAX : ret;
-}
-
 typedef struct NvmeAsyncEvent {
     QTAILQ_ENTRY(NvmeAsyncEvent) entry;
     NvmeAerResult result;
@@ -686,8 +378,6 @@ static inline uint16_t nvme_cid(NvmeRequest *req)
 
 uint16_t nvme_map_dptr(NvmeCtrlBase *n, NvmeSg *sg, size_t len,
                        NvmeCmd *cmd);
-
-extern const VMStateDescription nvme_vmstate_ns;
 
 /*
  * Inline helpers shared by core/ and test/. These are small, hot

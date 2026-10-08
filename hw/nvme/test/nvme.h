@@ -16,6 +16,367 @@
 
 #include "hw/nvme/core/nvme.h"
 
+/*
+ * Types, state and helpers that only the test device implements: the
+ * namespace "bus" (for nvme-ns qdevs), NVMe subsystems, zoned
+ * namespaces, FDP reclaim units, NGUIDs, atomic writes, and the
+ * configurable namespace parameters.
+ */
+#define NVME_EUI64_DEFAULT ((uint64_t)0x5254000000000000)
+#define NVME_FDP_MAX_EVENTS 63
+#define NVME_FDP_MAXPIDS 128
+
+/*
+ * Device-defined NvmeRequest flag bits (NvmeRequest.flags, core/nvme.h):
+ * NVME_REQ_ATOMIC_WRITE is set on write commands that are part of an
+ * atomic write sequence and must not overlap other in-flight commands.
+ */
+#define NVME_REQ_ATOMIC_WRITE (1u << 0)
+
+#define TYPE_NVME_BUS "nvme-bus"
+OBJECT_DECLARE_SIMPLE_TYPE(NvmeBus, NVME_BUS)
+
+typedef struct NvmeBus {
+    BusState parent_bus;
+} NvmeBus;
+
+#define TYPE_NVME_SUBSYS "nvme-subsys"
+#define NVME_SUBSYS(obj) \
+    OBJECT_CHECK(NvmeSubsystem, (obj), TYPE_NVME_SUBSYS)
+#define SUBSYS_SLOT_RSVD (void *)0xFFFF
+
+typedef struct NvmeReclaimUnit {
+    uint64_t ruamw;
+} NvmeReclaimUnit;
+
+typedef struct NvmeRuHandle {
+    uint8_t  ruht;
+    uint8_t  ruha;
+    uint64_t event_filter;
+    uint8_t  lbafi;
+    uint64_t ruamw;
+
+    /* reclaim units indexed by reclaim group */
+    NvmeReclaimUnit *rus;
+} NvmeRuHandle;
+
+typedef struct NvmeFdpEventBuffer {
+    NvmeFdpEvent     events[NVME_FDP_MAX_EVENTS];
+    unsigned int     nelems;
+    unsigned int     start;
+    unsigned int     next;
+} NvmeFdpEventBuffer;
+
+typedef struct NvmeEnduranceGroup {
+    uint8_t event_conf;
+
+    struct {
+        NvmeFdpEventBuffer host_events, ctrl_events;
+
+        uint16_t nruh;
+        uint16_t nrg;
+        uint8_t  rgif;
+        uint64_t runs;
+
+        uint64_t hbmw;
+        uint64_t mbmw;
+        uint64_t mbe;
+
+        bool enabled;
+
+        NvmeRuHandle *ruhs;
+    } fdp;
+} NvmeEnduranceGroup;
+
+typedef struct NvmeSubsystem {
+    DeviceState parent_obj;
+    NvmeBus     bus;
+    uint8_t     subnqn[256];
+    char        *serial;
+
+    NvmeCtrlBase       *ctrls[NVME_MAX_CONTROLLERS];
+    NvmeNamespaceBase      *namespaces[NVME_MAX_NAMESPACES + 1];
+    NvmeEnduranceGroup endgrp;
+
+    struct {
+        char *nqn;
+
+        struct {
+            bool     enabled;
+            uint64_t runs;
+            uint16_t nruh;
+            uint32_t nrg;
+        } fdp;
+    } params;
+} NvmeSubsystem;
+
+static inline NvmeCtrlBase *nvme_subsys_ctrl(NvmeSubsystem *subsys,
+                                         uint32_t cntlid)
+{
+    if (!subsys || cntlid >= NVME_MAX_CONTROLLERS) {
+        return NULL;
+    }
+
+    if (subsys->ctrls[cntlid] == SUBSYS_SLOT_RSVD) {
+        return NULL;
+    }
+
+    return subsys->ctrls[cntlid];
+}
+
+static inline NvmeNamespaceBase *nvme_subsys_ns(NvmeSubsystem *subsys,
+                                            uint32_t nsid)
+{
+    if (!subsys || !nsid || nsid > NVME_MAX_NAMESPACES) {
+        return NULL;
+    }
+
+    return subsys->namespaces[nsid];
+}
+
+typedef struct NvmeZone {
+    NvmeZoneDescr   d;
+    uint64_t        w_ptr;
+    QTAILQ_ENTRY(NvmeZone) entry;
+} NvmeZone;
+
+#define FDP_EVT_MAX 0xff
+#define NVME_FDP_MAX_NS_RUHS 32u
+#define FDPVSS 0
+
+/*
+ * NOTE: Apart from event type 0, any event type with a shift value of 0 is
+ * considered unsupported and thus skipped in get/set features calls.
+ *
+ * NOTE: NvmeRuHandle uses a 64bit event mask - refactor to support event types
+ *       of 63 or greater.
+ */
+static const uint8_t nvme_fdp_evf_shifts[FDP_EVT_MAX + 1] = {
+    /* Host events */
+    [FDP_EVT_RU_NOT_FULLY_WRITTEN]      = 0,
+    [FDP_EVT_RU_ATL_EXCEEDED]           = 1,
+    [FDP_EVT_CTRL_RESET_RUH]            = 2,
+    [FDP_EVT_INVALID_PID]               = 3,
+    /* CTRL events */
+    [FDP_EVT_MEDIA_REALLOC]             = 32,
+    [FDP_EVT_RUH_IMPLICIT_RU_CHANGE]    = 33,
+};
+
+#define NGUID_LEN 16
+
+typedef struct {
+    uint8_t data[NGUID_LEN];
+} NvmeNGUID;
+
+bool nvme_nguid_is_null(const NvmeNGUID *nguid);
+
+extern const PropertyInfo qdev_prop_nguid;
+
+#define DEFINE_PROP_NGUID_NODEFAULT(_name, _state, _field) \
+    DEFINE_PROP(_name, _state, _field, qdev_prop_nguid, NvmeNGUID)
+
+typedef struct NvmeNamespaceParams {
+    bool      detached;
+    bool      shared;
+    uint32_t  nsid;
+    QemuUUID  uuid;
+    NvmeNGUID nguid;
+    uint64_t  eui64;
+    bool      eui64_default;
+
+    uint16_t ms;
+    uint8_t  mset;
+    uint8_t  pi;
+    uint8_t  pil;
+    uint8_t  pif;
+
+    uint16_t mssrl;
+    uint32_t mcl;
+    uint8_t  msrc;
+
+    bool     zoned;
+    bool     cross_zone_read;
+    uint64_t zone_size_bs;
+    uint64_t zone_cap_bs;
+    uint32_t max_active_zones;
+    uint32_t max_open_zones;
+    uint32_t zd_extension_size;
+
+    uint32_t numzrwa;
+    uint64_t zrwas;
+    uint64_t zrwafg;
+
+    struct {
+        char *ruhs;
+    } fdp;
+
+    struct {
+        uint16_t nawun;
+        uint16_t nawupf;
+        uint16_t nabsn;
+        uint16_t nabspf;
+        uint16_t nabo;
+    } atomic;
+} NvmeNamespaceParams;
+
+typedef struct NvmeAtomic {
+    uint32_t    atomic_max_write_size;
+    uint64_t    atomic_boundary;
+    uint64_t    atomic_nabo;
+    bool        atomic_writes;
+} NvmeAtomic;
+
+/*
+ * NVM Express namespace device (test device only). The prod device uses
+ * the shared NvmeNamespaceBase state directly; only the test device
+ * instantiates the "nvme-ns" qdev type.
+ */
+#define TYPE_NVME_NS "nvme-ns"
+#define NVME_NS(obj) \
+    OBJECT_CHECK(NvmeNamespace, (obj), TYPE_NVME_NS)
+
+typedef struct NvmeNamespace {
+    NvmeNamespaceBase base;
+
+    /*
+     * Test device namespace state: everything the test device
+     * supports but the production device does not.
+     */
+    int32_t      bootindex;
+    char         bootindex_suffix[24];
+    NvmeIdNsNvm  id_ns_nvm;
+    NvmeIdNsInd  id_ns_ind;
+    uint8_t      pif;
+
+    struct {
+        uint16_t zrwas;
+        uint16_t zrwafg;
+        uint32_t numzrwa;
+    } zns;
+
+    QTAILQ_ENTRY(NvmeNamespace) entry;
+
+    NvmeIdNsZoned   *id_ns_zoned;
+    NvmeZone        *zone_array;
+    QTAILQ_HEAD(, NvmeZone) exp_open_zones;
+    QTAILQ_HEAD(, NvmeZone) imp_open_zones;
+    QTAILQ_HEAD(, NvmeZone) closed_zones;
+    QTAILQ_HEAD(, NvmeZone) full_zones;
+    uint32_t        num_zones;
+    uint64_t        zone_size;
+    uint64_t        zone_capacity;
+    uint32_t        zone_size_log2;
+    uint8_t         *zd_extensions;
+    int32_t         nr_open_zones;
+    int32_t         nr_active_zones;
+
+    NvmeNamespaceParams params;
+    NvmeSubsystem *subsys;
+    NvmeEnduranceGroup *endgrp;
+
+    struct {
+        uint32_t err_rec;
+    } features;
+
+    struct {
+        uint16_t nphs;
+        /* reclaim unit handle identifiers indexed by placement handle */
+        uint16_t *phs;
+    } fdp;
+
+    NvmeAtomic  atomic;
+} NvmeNamespace;
+
+/*
+ * Recover the test namespace from a base pointer.
+ */
+static inline NvmeNamespace *nvme_ns_of(NvmeNamespaceBase *ns)
+{
+    return container_of(ns, NvmeNamespace, base);
+}
+
+/*
+ * Zoned namespace helpers. These operate on the derived namespace
+ * state (zone bookkeeping lives in NvmeNamespace, not the base).
+ */
+static inline NvmeZoneState nvme_get_zone_state(NvmeZone *zone)
+{
+    return zone->d.zs >> 4;
+}
+
+static inline void nvme_set_zone_state(NvmeZone *zone, NvmeZoneState state)
+{
+    zone->d.zs = state << 4;
+}
+
+static inline uint64_t nvme_zone_rd_boundary(NvmeNamespace *ns, NvmeZone *zone)
+{
+    return zone->d.zslba + ns->zone_size;
+}
+
+static inline uint64_t nvme_zone_wr_boundary(NvmeZone *zone)
+{
+    return zone->d.zslba + zone->d.zcap;
+}
+
+static inline bool nvme_wp_is_valid(NvmeZone *zone)
+{
+    uint8_t st = nvme_get_zone_state(zone);
+
+    return st != NVME_ZONE_STATE_FULL &&
+           st != NVME_ZONE_STATE_READ_ONLY &&
+           st != NVME_ZONE_STATE_OFFLINE;
+}
+
+static inline uint8_t *nvme_get_zd_extension(NvmeNamespace *ns,
+                                             uint32_t zone_idx)
+{
+    return &ns->zd_extensions[zone_idx * ns->params.zd_extension_size];
+}
+
+static inline void nvme_aor_inc_open(NvmeNamespace *ns)
+{
+    assert(ns->nr_open_zones >= 0);
+    if (ns->params.max_open_zones) {
+        ns->nr_open_zones++;
+        assert(ns->nr_open_zones <= ns->params.max_open_zones);
+    }
+}
+
+static inline void nvme_aor_dec_open(NvmeNamespace *ns)
+{
+    if (ns->params.max_open_zones) {
+        assert(ns->nr_open_zones > 0);
+        ns->nr_open_zones--;
+    }
+    assert(ns->nr_open_zones >= 0);
+}
+
+static inline void nvme_aor_inc_active(NvmeNamespace *ns)
+{
+    assert(ns->nr_active_zones >= 0);
+    if (ns->params.max_active_zones) {
+        ns->nr_active_zones++;
+        assert(ns->nr_active_zones <= ns->params.max_active_zones);
+    }
+}
+
+static inline void nvme_aor_dec_active(NvmeNamespace *ns)
+{
+    if (ns->params.max_active_zones) {
+        assert(ns->nr_active_zones > 0);
+        ns->nr_active_zones--;
+        assert(ns->nr_active_zones >= ns->nr_open_zones);
+    }
+    assert(ns->nr_active_zones >= 0);
+}
+
+static inline void nvme_fdp_stat_inc(uint64_t *a, uint64_t b)
+{
+    uint64_t ret = *a + b;
+    *a = ret < *a ? UINT64_MAX : ret;
+}
+
 #define TYPE_NVME "nvme"
 #define NVME(obj) \
         OBJECT_CHECK(NvmeCtrl, (obj), TYPE_NVME)
@@ -67,6 +428,16 @@ typedef struct NvmeCtrl {
 
     NvmeSubsystem   *subsys;
 
+    /*
+     * The "legacy" namespace: set up from the controller 'drive'
+     * property. The production device uses the plain
+     * NvmeNamespaceBase embedded in NvmeCtrlBase; the test device
+     * embeds a fully derived NvmeNamespace here so that the
+     * drive-backed namespace keeps all of the (zeroed) derived
+     * state that it had before the device split.
+     */
+    NvmeNamespace   namespace;
+
     NvmePriCtrlCap  pri_ctrl_cap;
     uint32_t nr_sec_ctrls;
     NvmeSecCtrlEntry *sec_ctrl_list;
@@ -78,30 +449,10 @@ typedef struct NvmeCtrl {
 } NvmeCtrl;
 
 /*
- * NVM Express namespace device (test device only). The prod device uses
- * the shared NvmeNamespaceBase state directly; only the test device
- * instantiates the "nvme-ns" qdev type.
+ * Migration stream description for the "nvme-ns" child device and
+ * the legacy (drive-backed) namespace embedded in the controller.
  */
-#define TYPE_NVME_NS "nvme-ns"
-#define NVME_NS(obj) \
-    OBJECT_CHECK(NvmeNamespace, (obj), TYPE_NVME_NS)
-
-typedef struct NvmeNamespace {
-    /*
-     * Currently a wrapper holding the shared state: all namespace state
-     * lives in the base. The next commit moves test device fields out
-     * of NvmeNamespaceBase and into this structure.
-     */
-    NvmeNamespaceBase base;
-} NvmeNamespace;
-
-/*
- * Recover the test namespace from a base pointer.
- */
-static inline NvmeNamespace *nvme_ns_of(NvmeNamespaceBase *ns)
-{
-    return container_of(ns, NvmeNamespace, base);
-}
+extern const VMStateDescription nvme_vmstate_ns;
 
 /*
  * Namespace lifecycle (test device implementation; called from test/
