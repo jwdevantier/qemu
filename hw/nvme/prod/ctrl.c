@@ -973,9 +973,24 @@ static void vnvme_mmio_write_reg(VnvmeCtrl *n, hwaddr offset, uint64_t val,
     case offsetof(NvmeBar, acq) + 4:
         stl_le_p((uint8_t *)&n->bar.acq + 4, val);
         break;
-    case offsetof(NvmeBar, intms):
-    case offsetof(NvmeBar, intmc):
+    case offsetof(NvmeBar, intms): {
+        uint32_t intms = le32_to_cpu(n->bar.intms) | val;
+
+        stl_le_p(&n->bar.intms, intms);
+        n->bar.intmc = n->bar.intms;
+        trace_pci_nvme_mmio_intm_set(val & 0xffffffff, intms);
+        nvme_irq_do_intx(n);
         break;
+    }
+    case offsetof(NvmeBar, intmc): {
+        uint32_t intms = le32_to_cpu(n->bar.intms) & ~val;
+
+        stl_le_p(&n->bar.intms, intms);
+        n->bar.intmc = n->bar.intms;
+        trace_pci_nvme_mmio_intm_clr(val & 0xffffffff, intms);
+        nvme_irq_do_intx(n);
+        break;
+    }
     default:
         break;
     }
@@ -1294,6 +1309,8 @@ static void vnvme_realize(PCIDevice *pci_dev, Error **errp)
         }
     }
 
+    nvme_irq_init_notifiers(n, n->params.max_ioqpairs + 1);
+
     pci_dev->config[PCI_INTERRUPT_PIN] = 1;
 
     pci_config_set_vendor_id(pci_dev->config, VNVME_VID);
@@ -1315,6 +1332,8 @@ static void vnvme_exit(PCIDevice *pci_dev)
     VnvmeCtrl *n = VNVME(pci_dev);
 
     vnvme_reset(n);
+
+    nvme_irq_cleanup_notifiers(n);
 
     g_free(n->sq);
     g_free(n->cq);

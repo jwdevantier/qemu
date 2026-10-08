@@ -207,8 +207,8 @@ void nvme_init_cq_common(NvmeCQueue *cq)
 }
 
 void nvme_init_cq(NvmeCQueue *cq, NvmeCtrlBase *n, uint64_t dma_addr,
-                  uint16_t cqid, uint16_t vector, uint16_t size,
-                  uint16_t irq_enabled)
+                  uint16_t cqid, int vector, uint16_t size,
+                  bool irq_enabled)
 {
     cq->ctrl = n;
     cq->cqid = cqid;

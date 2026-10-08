@@ -49,6 +49,16 @@ typedef struct NvmeCtrlBase NvmeCtrlBase;
 typedef struct NvmeNamespaceBase NvmeNamespaceBase;
 
 /*
+ * Interrupt vector with the event notifier used to defer the actual
+ * interrupt delivery to the main loop.
+ */
+typedef struct NvmeIV {
+    NvmeCtrlBase *ctrl;
+
+    EventNotifier notifier;
+} NvmeIV;
+
+/*
  * The production device state. It is the base state verbatim; the test
  * device derives from NvmeCtrlBase (see test/nvme.h).
  */
@@ -345,8 +355,15 @@ typedef struct NvmeCtrlBase {
     Error *migration_blocker;
 
     struct {
+        NvmeIV *msix;
+
+        struct {
+            EventNotifier notifier;
+        } msi;
+
         struct {
             int pending;
+            EventNotifier notifier;
         } intx;
     } irq;
 } NvmeCtrlBase;
@@ -561,15 +578,18 @@ void nvme_blk_write(BlockBackend *blk, int64_t offset,
  * Interrupt delivery implemented in core/irq.c; queue mechanics in
  * core/queue.c. Declared here so both prod/ and test/ can call them.
  */
+void nvme_irq_do_intx(NvmeCtrlBase *n);
 void nvme_irq_check_intx(NvmeCtrlBase *n);
 void nvme_irq_msix(NvmeCtrlBase *n, int vector);
 void nvme_irq_msi(NvmeCtrlBase *n);
+void nvme_irq_init_notifiers(NvmeCtrlBase *n, int vectors);
+void nvme_irq_cleanup_notifiers(NvmeCtrlBase *n);
 
 void nvme_cq_kick(NvmeCQueue *cq);
 void nvme_init_cq_common(NvmeCQueue *cq);
 void nvme_init_cq(NvmeCQueue *cq, NvmeCtrlBase *n, uint64_t dma_addr,
-                  uint16_t cqid, uint16_t vector, uint16_t size,
-                  uint16_t irq_enabled);
+                  uint16_t cqid, int vector, uint16_t size,
+                  bool irq_enabled);
 void nvme_post_cqes(void *opaque);
 void nvme_enqueue_req_completion(NvmeCQueue *cq, NvmeRequest *req);
 void nvme_free_cq(NvmeCQueue *cq);

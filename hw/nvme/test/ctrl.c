@@ -6864,7 +6864,7 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
         stl_le_p(&n->base.bar.intms, intms);
         n->base.bar.intmc = n->base.bar.intms;
         trace_pci_nvme_mmio_intm_set(data & 0xffffffff, intms);
-        nvme_irq_check_intx(&n->base);
+        nvme_irq_do_intx(&n->base);
         break;
     case NVME_REG_INTMC:
         if (unlikely(msix_enabled(pci))) {
@@ -6877,7 +6877,7 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
         stl_le_p(&n->base.bar.intms, intms);
         n->base.bar.intmc = n->base.bar.intms;
         trace_pci_nvme_mmio_intm_clr(data & 0xffffffff, intms);
-        nvme_irq_check_intx(&n->base);
+        nvme_irq_do_intx(&n->base);
         break;
     case NVME_REG_CC:
         stl_le_p(&n->base.bar.cc, data);
@@ -7814,6 +7814,8 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
         return false;
     }
 
+    nvme_irq_init_notifiers(&n->base, n->params.msix_qsize);
+
     nvme_update_msixcap_ts(pci_dev, n->base.conf_msix_qsize);
 
     pcie_cap_deverr_init(pci_dev);
@@ -8356,6 +8358,8 @@ static void nvme_exit(PCIDevice *pci_dev)
     if (n->pmr.dev) {
         host_memory_backend_set_mapped(n->pmr.dev, false);
     }
+
+    nvme_irq_cleanup_notifiers(&n->base);
 
     if (n->params.msix_exclusive_bar && !pci_is_vf(pci_dev)) {
         msix_uninit_exclusive_bar(pci_dev);
@@ -9119,7 +9123,7 @@ static bool nvme_ctrl_post_load(void *opaque, int version_id, Error **errp)
      * from the migrated state to replay the actual level.
      */
     pci_set_irq(PCI_DEVICE(n), 0);
-    nvme_irq_check_intx(&n->base);
+    nvme_irq_do_intx(&n->base);
 
     return true;
 }
