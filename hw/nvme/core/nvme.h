@@ -55,6 +55,8 @@ typedef struct NvmeNamespaceBase NvmeNamespaceBase;
 typedef struct NvmeIV {
     NvmeCtrlBase *ctrl;
 
+    int virq;
+
     EventNotifier notifier;
 } NvmeIV;
 
@@ -584,6 +586,13 @@ void nvme_irq_msix(NvmeCtrlBase *n, int vector);
 void nvme_irq_msi(NvmeCtrlBase *n);
 void nvme_irq_init_notifiers(NvmeCtrlBase *n, int vectors);
 void nvme_irq_cleanup_notifiers(NvmeCtrlBase *n);
+
+int nvme_irqchip_vector_use(NvmeCtrlBase *n, uint32_t vector);
+int nvme_irqchip_vector_unmask(PCIDevice *pci, unsigned vector,
+                               MSIMessage msg);
+void nvme_irqchip_vector_mask(PCIDevice *pci, unsigned vector);
+void nvme_irqchip_vector_poll(PCIDevice *pci, unsigned int start,
+                              unsigned int end);
 
 void nvme_cq_kick(NvmeCQueue *cq);
 void nvme_init_cq_common(NvmeCQueue *cq);

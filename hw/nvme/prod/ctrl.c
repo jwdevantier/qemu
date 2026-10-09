@@ -33,6 +33,7 @@
 #include "qemu/error-report.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/msi.h"
+#include "system/accel-irq.h"
 #include "hw/pci/pci.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
@@ -863,6 +864,12 @@ static int vnvme_start_ctrl(VnvmeCtrl *n)
     n->starttime_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
     n->temperature = VNVME_TEMPERATURE;
     n->features.temp_thresh_hi = VNVME_TEMPERATURE_WARNING;
+
+    if (msix_enabled(PCI_DEVICE(n)) && accel_msi_via_irqfd_enabled()) {
+        msix_set_vector_notifiers(PCI_DEVICE(n), nvme_irqchip_vector_unmask,
+                                  nvme_irqchip_vector_mask,
+                                  nvme_irqchip_vector_poll);
+    }
 
     stl_le_p(&n->bar.csts, NVME_CSTS_READY);
     return 0;

@@ -208,6 +208,7 @@
 #include "system/block-backend.h"
 #include "system/hostmem.h"
 #include "hw/pci/msix.h"
+#include "system/accel-irq.h"
 #include "hw/pci/pcie_sriov.h"
 #include "system/spdm-socket.h"
 #include "migration/blocker.h"
@@ -6803,6 +6804,12 @@ static int nvme_start_ctrl(NvmeCtrl *n)
     }
 
     nvme_update_dsm_limits(n, NULL);
+
+    if (msix_enabled(PCI_DEVICE(n)) && accel_msi_via_irqfd_enabled()) {
+        msix_set_vector_notifiers(PCI_DEVICE(n), nvme_irqchip_vector_unmask,
+                                  nvme_irqchip_vector_mask,
+                                  nvme_irqchip_vector_poll);
+    }
 
     return 0;
 }

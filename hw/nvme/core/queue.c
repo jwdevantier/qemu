@@ -21,6 +21,7 @@
 #include "hw/pci/msi.h"
 #include "system/block-backend.h"
 #include "qemu/event_notifier.h"
+#include "system/accel-irq.h"
 #include "hw/nvme/trace.h"
 #include "hw/nvme/core/nvme.h"
 
@@ -180,7 +181,17 @@ void nvme_init_cq_common(NvmeCQueue *cq)
     NvmeCtrlBase *n = cq->ctrl;
 
     if (msix_present(PCI_DEVICE(n)) && cq->vector != -1) {
-        msix_vector_use(PCI_DEVICE(n), cq->vector);
+        PCIDevice *pci = PCI_DEVICE(n);
+
+        msix_vector_use(pci, cq->vector);
+
+        if (msix_enabled(pci) && accel_msi_via_irqfd_enabled()) {
+            NvmeIV *iv = &n->irq.msix[cq->vector];
+
+            if (iv->virq < 0) {
+                iv->virq = nvme_irqchip_vector_use(n, cq->vector);
+            }
+        }
     }
 
     QTAILQ_INIT(&cq->sq_list);
