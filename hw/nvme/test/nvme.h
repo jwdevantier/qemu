@@ -508,6 +508,7 @@ extern const VMStateDescription nvme_vmstate_ns;
  */
 void nvme_ns_init_format(NvmeNamespace *ns);
 int nvme_ns_setup(NvmeNamespace *ns, Error **errp);
+void nvme_ns_init_ids(NvmeNamespace *ns);
 void nvme_ns_drain(NvmeNamespace *ns);
 void nvme_ns_shutdown(NvmeNamespace *ns);
 void nvme_ns_cleanup(NvmeNamespace *ns);

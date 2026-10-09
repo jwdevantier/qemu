@@ -495,8 +495,20 @@ static uint16_t vnvme_identify_ns_list(VnvmeCtrl *n, NvmeRequest *req)
 static uint16_t vnvme_identify_ns_descr_list(VnvmeCtrl *n, NvmeRequest *req)
 {
     NvmeIdentify *c = (NvmeIdentify *)&req->cmd;
+    NvmeNamespaceBase *ns;
     uint32_t nsid = le32_to_cpu(c->nsid);
     uint8_t list[NVME_IDENTIFY_DATA_SIZE] = {};
+    uint8_t *pos = list;
+    struct {
+        NvmeIdNsDescr hdr;
+        uint8_t v[NVME_NIDL_UUID];
+    } QEMU_PACKED uuid = {};
+    struct {
+        NvmeIdNsDescr hdr;
+        uint8_t v;
+    } QEMU_PACKED csi = {};
+    const char *serial;
+    QemuUUID ns_uuid;
 
     trace_pci_nvme_identify_ns_descr_list(nsid);
 
@@ -504,10 +516,33 @@ static uint16_t vnvme_identify_ns_descr_list(VnvmeCtrl *n, NvmeRequest *req)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
+    ns = nvme_ns(n, nsid);
+
     /*
-     * vnvme does not expose namespace identifiers (EUI64, NGUID, UUID or
-     * CSI descriptors); the returned list is empty.
+     * vnvme exposes no configurable namespace identifiers; the UUID is
+     * derived from the effective serial (the serial parameter if set,
+     * the default SN otherwise) and the nsid, so it is stable across
+     * boots and migration. See core/ns.c.
      */
+    serial = n->params.serial;
+    if (!serial || !serial[0]) {
+        serial = VNVME_SN;
+    }
+
+    nvme_ns_derive_uuid(serial, nsid, &ns_uuid);
+
+    uuid.hdr.nidt = NVME_NIDT_UUID;
+    uuid.hdr.nidl = NVME_NIDL_UUID;
+    memcpy(uuid.v, ns_uuid.data, NVME_NIDL_UUID);
+    memcpy(pos, &uuid, sizeof(uuid));
+    pos += sizeof(uuid);
+
+    csi.hdr.nidt = NVME_NIDT_CSI;
+    csi.hdr.nidl = NVME_NIDL_CSI;
+    csi.v = ns->csi;
+    memcpy(pos, &csi, sizeof(csi));
+    pos += sizeof(csi);
+
     return nvme_c2h(n, list, sizeof(list),
             NVME_IDENTIFY_DATA_SIZE, req);
 }

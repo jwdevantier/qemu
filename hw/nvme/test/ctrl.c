@@ -8326,6 +8326,8 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
             return;
         }
 
+        nvme_ns_init_ids(ns);
+
         n->subsys->namespaces[ns->base.params.nsid] = &ns->base;
     }
 

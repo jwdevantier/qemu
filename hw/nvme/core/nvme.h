@@ -20,6 +20,7 @@
 
 #include "qemu/log.h"
 #include "qemu/aiocb.h"
+#include "qemu/uuid.h"
 #include "hw/pci/pci_device.h"
 #include "hw/block/block.h"
 
@@ -111,6 +112,18 @@ static inline uint32_t nvme_nsid(NvmeNamespaceBase *ns)
 
     return 0;
 }
+
+/*
+ * Derive a default namespace UUID from the controller identity string
+ * (the controller serial, or the subsystem serial for shared
+ * namespaces) and the namespace id. Implemented in core/ns.c.
+ *
+ * The derivation is guest-visible ABI and must never change: it is an
+ * RFC 4122 version 5 (name-based, SHA-1) UUID of the fixed namespace
+ * e0746fe0-2a28-5b3a-81ff-d3b35cce6101 with the name
+ * "<idstr>:<nsid>".
+ */
+void nvme_ns_derive_uuid(const char *idstr, uint32_t nsid, QemuUUID *uuid);
 
 static inline size_t nvme_l2b(NvmeNamespaceBase *ns, uint64_t lba)
 {

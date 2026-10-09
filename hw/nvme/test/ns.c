@@ -756,6 +756,23 @@ int nvme_ns_setup(NvmeNamespace *ns, Error **errp)
     return 0;
 }
 
+/*
+ * Derive the default namespace UUID from the controller identity (the
+ * subsystem serial for shared namespaces, the controller serial
+ * otherwise) and the namespace id. An explicitly configured UUID (the
+ * nvme-ns "uuid" property) is left untouched. Must be called once the
+ * namespace id is final.
+ */
+void nvme_ns_init_ids(NvmeNamespace *ns)
+{
+    const char *idstr = ns->subsys ? ns->subsys->serial :
+        ns->base.ctrl ? ns->base.ctrl->params.serial : NULL;
+
+    if (idstr && qemu_uuid_is_null(&ns->params.uuid)) {
+        nvme_ns_derive_uuid(idstr, ns->base.params.nsid, &ns->params.uuid);
+    }
+}
+
 void nvme_ns_drain(NvmeNamespace *ns)
 {
     blk_drain(ns->base.blkconf.blk);
@@ -974,6 +991,8 @@ static void nvme_ns_realize(DeviceState *dev, Error **errp)
                                  ns->bootindex_suffix);
         }
     }
+
+    nvme_ns_init_ids(ns);
 }
 
 static const VMStateDescription nvme_vmstate_lbaf = {
