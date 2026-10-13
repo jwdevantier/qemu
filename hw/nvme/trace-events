@@ -1,5 +1,6 @@
 # successful events
 pci_nvme_irq_msix(int vector) "vector %d"
+pci_nvme_irq_msi(void) "raising MSI IRQ"
 pci_nvme_irq_check_intx(uint32_t intms) "intms 0x%"PRIx32""
 pci_nvme_dma_read(uint64_t prp1, uint64_t prp2) "DMA read, prp1=0x%"PRIx64" prp2=0x%"PRIx64""
 pci_nvme_dbbuf_config(uint64_t dbs_addr, uint64_t eis_addr) "dbs_addr=0x%"PRIx64" eis_addr=0x%"PRIx64""

@@ -208,6 +208,7 @@
 #include "system/block-backend.h"
 #include "system/hostmem.h"
 #include "hw/pci/msix.h"
+#include "hw/pci/msi.h"
 #include "hw/pci/pcie_sriov.h"
 #include "system/spdm-socket.h"
 #include "migration/blocker.h"
@@ -787,36 +788,15 @@ static inline bool nvme_sq_full(NvmeSQueue *sq)
     return (sq->tail + 1) % sq->size == sq->head;
 }
 
-static void nvme_irq_check_intx(NvmeCtrl *n)
-{
-    PCIDevice *pci = PCI_DEVICE(n);
-    uint32_t intms = ldl_le_p(&n->base.bar.intms);
-    int level = n->base.irq.intx.pending > 0 && (~intms & 1) ? 1 : 0;
-
-    /* vfs does not implement intx. */
-    if (pci_is_vf(pci)) {
-        return;
-    }
-
-    trace_pci_nvme_irq_check_intx(intms);
-
-    pci_set_irq(pci, level);
-}
-
-static void nvme_irq_msix(NvmeCtrl *n, int vector)
-{
-    PCIDevice *pci = PCI_DEVICE(n);
-
-    trace_pci_nvme_irq_msix(vector);
-
-    msix_notify(pci, vector);
-}
-
 static inline bool nvme_msix_enabled(NvmeCtrl *n)
 {
     return msix_enabled(PCI_DEVICE(n));
 }
 
+static inline bool nvme_msi_enabled(NvmeCtrl *n)
+{
+    return msi_enabled(PCI_DEVICE(n));
+}
 /*
  * The host advanced the CQ head (via a real doorbell write or through
  * the shadow doorbell buffer ioeventfd): process the new head, i.e.
@@ -838,7 +818,7 @@ static void nvme_cq_kick(NvmeCQueue *cq)
          */
         n->base.irq.intx.pending--;
 
-        nvme_irq_check_intx(n);
+        nvme_irq_check_intx(&n->base);
     }
 }
 
@@ -1161,11 +1141,13 @@ static void nvme_post_cqes(void *opaque)
 
     if (cq->tail != cq->head) {
         if (nvme_msix_enabled(n)) {
-            nvme_irq_msix(n, cq->vector);
+            nvme_irq_msix(&n->base, cq->vector);
+        } else if (nvme_msi_enabled(n)) {
+            nvme_irq_msi(&n->base);
         } else if (!pending) {
             n->base.irq.intx.pending++;
 
-            nvme_irq_check_intx(n);
+            nvme_irq_check_intx(&n->base);
         }
     }
 }
@@ -5284,7 +5266,7 @@ static uint16_t nvme_del_cq(NvmeCtrl *n, NvmeRequest *req)
     if (!nvme_cq_empty(cq) && cq->vector != -1 && !nvme_msix_enabled(n)) {
         n->base.irq.intx.pending--;
 
-        nvme_irq_check_intx(n);
+        nvme_irq_check_intx(&n->base);
     }
 
     trace_pci_nvme_del_cq(qid);
@@ -7973,7 +7955,7 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
         stl_le_p(&n->base.bar.intms, intms);
         n->base.bar.intmc = n->base.bar.intms;
         trace_pci_nvme_mmio_intm_set(data & 0xffffffff, intms);
-        nvme_irq_check_intx(n);
+        nvme_irq_check_intx(&n->base);
         break;
     case NVME_REG_INTMC:
         if (unlikely(msix_enabled(pci))) {
@@ -7986,7 +7968,7 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
         stl_le_p(&n->base.bar.intms, intms);
         n->base.bar.intmc = n->base.bar.intms;
         trace_pci_nvme_mmio_intm_clr(data & 0xffffffff, intms);
-        nvme_irq_check_intx(n);
+        nvme_irq_check_intx(&n->base);
         break;
     case NVME_REG_CC:
         stl_le_p(&n->base.bar.cc, data);
@@ -10202,7 +10184,7 @@ static bool nvme_ctrl_post_load(void *opaque, int version_id, Error **errp)
      * from the migrated state to replay the actual level.
      */
     pci_set_irq(PCI_DEVICE(n), 0);
-    nvme_irq_check_intx(n);
+    nvme_irq_check_intx(&n->base);
 
     return true;
 }

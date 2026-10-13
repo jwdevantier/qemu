@@ -422,4 +422,12 @@ void nvme_blk_read(BlockBackend *blk, int64_t offset, uint32_t align,
 void nvme_blk_write(BlockBackend *blk, int64_t offset, uint32_t align,
                     BlockCompletionFunc *cb, NvmeRequest *req);
 
+/*
+ * Interrupt delivery implemented in core/irq.c. Declared here so
+ * the device models can call it.
+ */
+void nvme_irq_check_intx(NvmeCtrlBase *n);
+void nvme_irq_msix(NvmeCtrlBase *n, int vector);
+void nvme_irq_msi(NvmeCtrlBase *n);
+
 #endif /* HW_NVME_NVME_H */
