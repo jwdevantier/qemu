@@ -533,7 +533,7 @@ static bool nvme_addr_is_cmb(NvmeCtrl *n, hwaddr addr)
 static inline void *nvme_addr_to_cmb(NvmeCtrl *n, hwaddr addr)
 {
     hwaddr base = n->params.legacy_cmb ? n->cmb.mem.addr : n->cmb.cba;
-    return &n->cmb.buf[addr - base];
+    return memory_region_get_ram_ptr(&n->cmb.mem) + (addr - base);
 }
 
 static bool nvme_addr_is_pmr(NvmeCtrl *n, hwaddr addr)
@@ -7597,29 +7597,6 @@ static const MemoryRegionOps nvme_mmio_ops = {
     },
 };
 
-static void nvme_cmb_write(void *opaque, hwaddr addr, uint64_t data,
-                           unsigned size)
-{
-    NvmeCtrl *n = (NvmeCtrl *)opaque;
-    stn_le_p(&n->cmb.buf[addr], size, data);
-}
-
-static uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size)
-{
-    NvmeCtrl *n = (NvmeCtrl *)opaque;
-    return ldn_le_p(&n->cmb.buf[addr], size);
-}
-
-static const MemoryRegionOps nvme_cmb_ops = {
-    .read = nvme_cmb_read,
-    .write = nvme_cmb_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .impl = {
-        .min_access_size = 1,
-        .max_access_size = 8,
-    },
-};
-
 static bool nvme_check_params(NvmeCtrl *n, Error **errp)
 {
     NvmeParams *params = &n->params;
@@ -7876,9 +7853,14 @@ static void nvme_init_cmb(NvmeCtrl *n, PCIDevice *pci_dev)
     uint64_t cmb_size = n->params.cmb_size_mb * MiB;
     uint64_t cap = ldq_le_p(&n->base.bar.cap);
 
-    n->cmb.buf = g_malloc0(cmb_size);
-    memory_region_init_io(&n->cmb.mem, OBJECT(n), &nvme_cmb_ops, n,
-                          "nvme-cmb", cmb_size);
+    /*
+     * The CMB is a RAM memory region: the guest accesses it as plain
+     * memory, and the data path can map it directly (address_space_map
+     * resolves it through the PCI BAR; it also migrates as a RAM
+     * block, so the CMB contents survive migration).
+     */
+    memory_region_init_ram(&n->cmb.mem, OBJECT(n), "nvme-cmb", cmb_size,
+                           &error_abort);
     pci_register_bar(pci_dev, NVME_CMB_BIR,
                      PCI_BASE_ADDRESS_SPACE_MEMORY |
                      PCI_BASE_ADDRESS_MEM_TYPE_64 |
@@ -8623,10 +8605,6 @@ static void nvme_exit(PCIDevice *pci_dev)
     g_free(n->base.cq);
     g_free(n->base.sq);
     g_free(n->base.aer_reqs);
-
-    if (n->params.cmb_size_mb) {
-        g_free(n->cmb.buf);
-    }
 
     /* Only one of the `spdm_socket`s below should have been setup */
     assert(!(pci_dev->doe_spdm.spdm_socket > 0 && n->base.spdm_socket >= 0));

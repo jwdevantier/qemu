@@ -454,7 +454,6 @@ typedef struct NvmeCtrl {
 
     struct {
         MemoryRegion mem;
-        uint8_t      *buf;
         bool         cmse;
         hwaddr       cba;
     } cmb;
