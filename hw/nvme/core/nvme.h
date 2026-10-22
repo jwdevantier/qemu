@@ -295,7 +295,7 @@ typedef struct NvmeCtrlBase {
 
     uint32_t    dn; /* Disable Normal */
 
-/* Socket mapping to SPDM over NVMe Security In/Out commands */
+    /* Socket mapping to SPDM over NVMe Security In/Out commands */
     int spdm_socket;
 
     /*
@@ -324,6 +324,43 @@ typedef struct NvmeCtrlBase {
         } intx;
     } irq;
 } NvmeCtrlBase;
+
+/*
+ * Abstract base class for the NVMe device models: the 'nvme' test
+ * device derives from it.
+ *
+ * It holds the dispatch hooks that the shared core code invokes:
+ * the submission queue bottom half runs the core's fetch loop
+ * (nvme_process_sq in core/queue.c), which calls io_cmd()/admin_cmd()
+ * and, if installed, sq_admit() before starting a fetched command.
+ * These are per-class (constant after class_init), not per-instance
+ * state.
+ *
+ * io_cmd() and admin_cmd() have no default and must be provided by
+ * every device (the test device installs its nvme_io_cmd()/
+ * nvme_admin_cmd() dispatch directly, retyped to NvmeCtrlBase).
+ * sq_admit() is optional (a device whose submission processing
+ * carries device-specific admission semantics installs it; the test
+ * device holds back commands at atomic write batch boundaries; the
+ * production device leaves it NULL): the core calls it once a
+ * command has been fetched and its request set up, and a decline
+ * makes the core put the request back, leave the command unconsumed
+ * and retry on the next run of the bottom half.
+ */
+typedef struct NvmeBaseClass {
+    PCIDeviceClass parent_class;
+
+    uint16_t (*io_cmd)(NvmeCtrlBase *n, NvmeRequest *req);
+    uint16_t (*admin_cmd)(NvmeCtrlBase *n, NvmeRequest *req);
+
+    bool (*sq_admit)(NvmeSQueue *sq, NvmeRequest *req);
+} NvmeBaseClass;
+
+#define TYPE_NVME_BASE "nvme-base"
+#define NVME_BASE_CLASS(klass) \
+    OBJECT_CLASS_CHECK(NvmeBaseClass, (klass), TYPE_NVME_BASE)
+#define NVME_BASE_GET_CLASS(obj) \
+    OBJECT_GET_CLASS(NvmeBaseClass, (obj), TYPE_NVME_BASE)
 
 typedef enum NvmeResetType {
     NVME_RESET_FUNCTION   = 0,
@@ -470,22 +507,17 @@ static inline bool nvme_addr_is_iomem(NvmeCtrlBase *n, hwaddr addr)
 }
 
 /*
- * CMB/PMR-aware address operations and the submission queue bottom
- * half, implemented by the test device (test/ctrl.c). The test device
- * is the only device model using the core at this point, so
- * core/dptr.c and core/queue.c call these directly; dispatch through
- * a QOM base class arrives with the production device ("move device
- * dispatch hooks to a QOM base class").
- *
- * nvme_process_sq() is the submission queue bottom half callback
- * (the submission queue command dispatch is not shared). The ioeventfd
- * wiring is common and lives in core/queue.c.
+ * CMB/PMR-aware address operations, implemented by the test device
+ * (test/ctrl.c). The test device is the only device model using the
+ * core at this point, so core/dptr.c calls these directly; this
+ * stays a direct call - the Sg-era address operations never become
+ * class methods and are dropped wholesale again in "map data
+ * buffers eagerly and drop NvmeSg".
  */
 uint16_t nvme_map_addr(NvmeCtrlBase *n, NvmeSg *sg, hwaddr addr, size_t len);
 int nvme_addr_read(NvmeCtrlBase *n, hwaddr addr, void *buf, int size);
 int nvme_addr_write(NvmeCtrlBase *n, hwaddr addr, const void *buf, int size);
 bool nvme_is_dma_addr(NvmeCtrlBase *n, hwaddr addr);
-void nvme_process_sq(void *opaque);
 
 /*
  * Functions implemented in core/dptr.c and core/dma.c. Declared here so
@@ -531,6 +563,7 @@ void nvme_sq_cancel_inflight(NvmeSQueue *sq, uint16_t status);
 void nvme_free_sq(NvmeSQueue *sq);
 uint16_t nvme_del_sq(NvmeCtrlBase *n, NvmeRequest *req);
 uint16_t nvme_create_sq(NvmeCtrlBase *n, NvmeRequest *req);
+void nvme_process_sq(NvmeSQueue *sq);
 
 /*
  * Shadow doorbell buffer (DBBUF) support, common to both devices.

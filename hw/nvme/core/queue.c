@@ -95,7 +95,7 @@ void nvme_cq_kick(NvmeCQueue *cq)
     }
 }
 
-/* --- Shadow doorbell buffer --- */
+/* --- CQ lifecycle --- */
 
 /*
  * Shadow doorbell buffer helpers: with DBBUF enabled, the host writes
@@ -148,6 +148,7 @@ static bool nvme_sq_update_tail(NvmeSQueue *sq)
 
     return false;
 }
+
 /*
  * Shadow doorbell notifier wiring (defined after the queue
  * lifecycle): when a doorbell buffer is configured, an event
@@ -434,10 +435,18 @@ uint16_t nvme_create_cq(NvmeCtrlBase *n, NvmeRequest *req)
 /* --- SQ lifecycle --- */
 
 /*
+ * Bottom-half entry: run the submission queue fetch loop.
+ */
+static void nvme_sq_bh(void *opaque)
+{
+    NvmeSQueue *sq = opaque;
+
+    nvme_process_sq(sq);
+}
+
+/*
  * Common part of the SQ setup (like the CQ counterpart; see
- * nvme_init_cq_common). The bottom half is armed with the device's
- * nvme_process_sq since the submission queue command dispatch is not
- * shared.
+ * nvme_init_cq_common).
  */
 void nvme_init_sq_common(NvmeSQueue *sq)
 {
@@ -453,7 +462,7 @@ void nvme_init_sq_common(NvmeSQueue *sq)
         QTAILQ_INSERT_TAIL(&sq->req_list, &sq->io_req[i], entry);
     }
 
-    sq->bh = qemu_bh_new_guarded(nvme_process_sq, sq,
+    sq->bh = qemu_bh_new_guarded(nvme_sq_bh, sq,
                                  &DEVICE(n)->mem_reentrancy_guard);
 
     if (n->dbbuf_enabled) {
@@ -609,6 +618,72 @@ uint16_t nvme_create_sq(NvmeCtrlBase *n, NvmeRequest *req)
     sq = g_malloc0(sizeof(*sq));
     nvme_init_sq(sq, n, prp1, sqid, cqid, qsize + 1);
     return NVME_SUCCESS;
+}
+
+/*
+ * The single submission queue fetch loop, run by the queue's bottom
+ * half (and by the shadow doorbell event notifier). A device model
+ * with device-specific admission semantics installs the sq_admit
+ * class hook: it is called once a command has been fetched and its
+ * request set up, and may decline to start the command.
+ */
+void nvme_process_sq(NvmeSQueue *sq)
+{
+    NvmeCtrlBase *n = sq->ctrl;
+    NvmeCQueue *cq = n->cq[sq->cqid];
+    NvmeBaseClass *nc = NVME_BASE_GET_CLASS(n);
+
+    uint16_t status;
+    hwaddr addr;
+    NvmeCmd cmd;
+    NvmeRequest *req;
+
+    /*
+     * We don't want to have a race with nvme_ctrl_pre_save().
+     * What implicitly protects us from this is BQL.
+     */
+    assert(bql_locked());
+
+    while (!(nvme_sq_empty(sq) || QTAILQ_EMPTY(&sq->req_list))) {
+        addr = sq->dma_addr + (sq->head << NVME_SQES);
+        if (nvme_addr_read(n, addr, (void *)&cmd, sizeof(cmd))) {
+            trace_pci_nvme_err_addr_read(addr);
+            trace_pci_nvme_err_cfs();
+            stl_le_p(&n->bar.csts, NVME_CSTS_FAILED);
+            break;
+        }
+
+        req = QTAILQ_FIRST(&sq->req_list);
+        QTAILQ_REMOVE(&sq->req_list, req, entry);
+        QTAILQ_INSERT_TAIL(&sq->out_req_list, req, entry);
+        nvme_req_clear(req);
+        req->cqe.sq_id = cpu_to_le16(sq->sqid);
+        req->cqe.cid = cmd.cid;
+        memcpy(&req->cmd, &cmd, sizeof(NvmeCmd));
+
+        if (nc->sq_admit && !nc->sq_admit(sq, req)) {
+            /*
+             * The device declines to start this command yet: put the
+             * request back and leave the command unconsumed. The
+             * decline is re-evaluated as the in-flight state changes
+             * (the test device holds a command back at an atomic
+             * write batch boundary until the outstanding write has
+             * completed), so re-arm and retry on the next run.
+             */
+            QTAILQ_REMOVE(&sq->out_req_list, req, entry);
+            QTAILQ_INSERT_HEAD(&sq->req_list, req, entry);
+            qemu_bh_schedule(sq->bh);
+            return;
+        }
+
+        nvme_inc_sq_head(sq);
+
+        status = sq->sqid ? nc->io_cmd(n, req) : nc->admin_cmd(n, req);
+        if (status != NVME_NO_COMPLETE) {
+            req->status = status;
+            nvme_enqueue_req_completion(cq, req);
+        }
+    }
 }
 
 /*

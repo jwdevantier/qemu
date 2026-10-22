@@ -8,8 +8,9 @@
  * CMB/PMR-aware implementations (nvme_map_addr/addr_read/
  * addr_write/is_dma_addr, test/ctrl.c) which this code calls
  * directly. The test device is the only device model using the core
- * at this point; dispatch through a QOM base class arrives with the
- * production device.
+ * at this point, and this stays a direct call: the Sg-era address
+ * operations never become class methods and are dropped wholesale
+ * again in "map data buffers eagerly and drop NvmeSg".
  *
  * Copyright (c) 2012, Intel Corporation
  * Copyright (c) 2025 Samsung Electronics Co., Ltd.

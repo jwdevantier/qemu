@@ -591,11 +591,12 @@ static uint16_t nvme_map_addr_pmr(NvmeCtrl *n, QEMUIOVector *iov, hwaddr addr,
 /*
  * CMB/PMR-aware address operations, called directly by core/dptr.c
  * (the test device is the only device model using the core at this
- * point; dispatch through a QOM base class arrives with the
- * production device).
+ * point). This stays a direct call: the Sg-era address operations
+ * never become class methods and are dropped wholesale again in
+ * "map data buffers eagerly and drop NvmeSg".
  */
 uint16_t nvme_map_addr(NvmeCtrlBase *n, NvmeSg *sg, hwaddr addr,
-                            size_t len)
+                              size_t len)
 {
     NvmeCtrl *t = nvme_ctrl_of(n);
     bool cmb = false, pmr = false;
@@ -947,7 +948,6 @@ uint16_t nvme_bounce_mdata(NvmeCtrlBase *n, void *ptr, uint32_t len,
 
     return nvme_tx(n, &req->sg, ptr, len, dir);
 }
-
 
 static void nvme_process_aers(void *opaque)
 {
@@ -4066,8 +4066,9 @@ static uint16_t nvme_io_cmd_zoned(NvmeCtrl *n, NvmeRequest *req)
     return __nvme_io_cmd_nvm(n, req);
 }
 
-static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeRequest *req)
+static uint16_t nvme_io_cmd(NvmeCtrlBase *bn, NvmeRequest *req)
 {
+    NvmeCtrl *n = nvme_ctrl_of(bn);
     NvmeNamespace *ns;
     uint32_t nsid = le32_to_cpu(req->cmd.nsid);
 
@@ -4718,7 +4719,6 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeRequest *req)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 }
-
 
 static void move_cq_req_list(NvmeCQueue *cq_to, NvmeCQueue *cq_from)
 {
@@ -6656,8 +6656,10 @@ static uint16_t nvme_directive_receive(NvmeCtrl *n, NvmeRequest *req)
     }
 }
 
-static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
+static uint16_t nvme_admin_cmd(NvmeCtrlBase *bn, NvmeRequest *req)
 {
+    NvmeCtrl *n = nvme_ctrl_of(bn);
+
     trace_pci_nvme_admin_cmd(nvme_cid(req), nvme_sqid(req), req->cmd.opcode,
                              nvme_adm_opc_str(req->cmd.opcode));
 
@@ -6843,75 +6845,47 @@ static NvmeAtomic *nvme_get_atomic(NvmeCtrl *n, NvmeCmd *cmd)
     return NULL;
 }
 
-void nvme_process_sq(void *opaque)
+/*
+ * Submission admission (NvmeBaseClass.sq_admit, called by the core
+ * fetch loop in core/queue.c once a command has been fetched and its
+ * request set up): the atomic write batching. A write crossing an
+ * atomic boundary may have to be held back until the currently
+ * outstanding write has completed, and commands that are part of an
+ * atomic write sequence are flagged so that later submissions do not
+ * overlap them. This is deliberately kept out of the hardened core
+ * (and out of the production device entirely).
+ */
+static bool nvme_sq_admit(NvmeSQueue *sq, NvmeRequest *req)
 {
-    NvmeSQueue *sq = opaque;
     NvmeCtrl *n = nvme_ctrl_from_sq(sq);
-    NvmeCQueue *cq = n->base.cq[sq->cqid];
+    NvmeAtomic *atomic;
 
-    uint16_t status;
-    hwaddr addr;
-    NvmeCmd cmd;
-    NvmeRequest *req;
-
-    /*
-     * We don't want to have a race with nvme_ctrl_pre_save().
-     * What implicitly protects us from this is BQL.
-     */
-    assert(bql_locked());
-
-    while (!(nvme_sq_empty(sq) || QTAILQ_EMPTY(&sq->req_list))) {
-        NvmeAtomic *atomic;
-        bool cmd_is_atomic;
-
-        addr = sq->dma_addr + (sq->head << NVME_SQES);
-        if (nvme_addr_read(&n->base, addr, (void *)&cmd, sizeof(cmd))) {
-            trace_pci_nvme_err_addr_read(addr);
-            trace_pci_nvme_err_cfs();
-            stl_le_p(&n->base.bar.csts, NVME_CSTS_FAILED);
-            break;
-        }
-
-        atomic = nvme_get_atomic(n, &cmd);
-
-        cmd_is_atomic = false;
-        if (sq->sqid && atomic) {
-            int ret;
-
-            ret = nvme_atomic_write_check(n, &cmd, atomic);
-            switch (ret) {
-            case NVME_ATOMIC_NO_START:
-                qemu_bh_schedule(sq->bh);
-                return;
-            case NVME_ATOMIC_START_ATOMIC:
-                cmd_is_atomic = true;
-                break;
-            case NVME_ATOMIC_START_NONATOMIC:
-            default:
-                break;
-            }
-        }
-        nvme_inc_sq_head(sq);
-
-        req = QTAILQ_FIRST(&sq->req_list);
-        QTAILQ_REMOVE(&sq->req_list, req, entry);
-        QTAILQ_INSERT_TAIL(&sq->out_req_list, req, entry);
-        nvme_req_clear(req);
-        req->cqe.sq_id = cpu_to_le16(sq->sqid);
-        req->cqe.cid = cmd.cid;
-        memcpy(&req->cmd, &cmd, sizeof(NvmeCmd));
-
-        if (cmd_is_atomic) {
-            req->flags |= NVME_REQ_ATOMIC_WRITE;
-        }
-
-        status = sq->sqid ? nvme_io_cmd(n, req) :
-            nvme_admin_cmd(n, req);
-        if (status != NVME_NO_COMPLETE) {
-            req->status = status;
-            nvme_enqueue_req_completion(cq, req);
-        }
+    if (!sq->sqid) {
+        return true;
     }
+
+    atomic = nvme_get_atomic(n, &req->cmd);
+    if (!atomic) {
+        return true;
+    }
+
+    switch (nvme_atomic_write_check(n, &req->cmd, atomic)) {
+    case NVME_ATOMIC_NO_START:
+        /*
+         * The command cannot be started yet (atomic write batch
+         * boundary); the core puts the request back and retries on
+         * the next run of the queue's bottom half.
+         */
+        return false;
+    case NVME_ATOMIC_START_ATOMIC:
+        req->flags |= NVME_REQ_ATOMIC_WRITE;
+        break;
+    case NVME_ATOMIC_START_NONATOMIC:
+    default:
+        break;
+    }
+
+    return true;
 }
 
 static void nvme_update_msixcap_ts(PCIDevice *pci_dev, uint32_t table_size)
@@ -9496,8 +9470,16 @@ static const VMStateDescription nvme_vmstate = {
 
 static void nvme_class_init(ObjectClass *oc, const void *data)
 {
+    NvmeBaseClass *bc = NVME_BASE_CLASS(oc);
     DeviceClass *dc = DEVICE_CLASS(oc);
     PCIDeviceClass *pc = PCI_DEVICE_CLASS(oc);
+
+    /* the test device command dispatch (retyped to NvmeCtrlBase) */
+    bc->io_cmd = nvme_io_cmd;
+    bc->admin_cmd = nvme_admin_cmd;
+
+    /* the test device submission admission (atomic write batching) */
+    bc->sq_admit = nvme_sq_admit;
 
     pc->realize = nvme_realize;
     pc->config_write = nvme_pci_write_config;
@@ -9528,7 +9510,7 @@ static void nvme_instance_init(Object *obj)
 
 static const TypeInfo nvme_info = {
     .name          = TYPE_NVME,
-    .parent        = TYPE_PCI_DEVICE,
+    .parent        = TYPE_NVME_BASE,
     .instance_size = sizeof(NvmeCtrl),
     .instance_init = nvme_instance_init,
     .class_init    = nvme_class_init,
