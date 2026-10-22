@@ -116,24 +116,34 @@ typedef struct NvmeAsyncEvent {
     NvmeAerResult result;
 } NvmeAsyncEvent;
 
-enum {
-    NVME_SG_ALLOC = 1 << 0,
-    NVME_SG_DMA   = 1 << 1,
-};
-
-typedef struct NvmeSg {
-    int flags;
-
-    union {
-        QEMUSGList   qsg;
-        QEMUIOVector iov;
-    };
-} NvmeSg;
-
 typedef enum NvmeTxDirection {
     NVME_TX_DIRECTION_TO_DEVICE   = 0,
     NVME_TX_DIRECTION_FROM_DEVICE = 1,
 } NvmeTxDirection;
+
+/*
+ * An eagerly mapped data buffer: a QEMUIOVector of host memory
+ * fragments, plus the bookkeeping required to release the underlying
+ * mappings (see core/dptr.c).
+ *
+ * `frag` records the owned mappings, one per dma_memory_map() call or
+ * bounce buffer; `iov` may hold sub-ranges of the fragments (the test
+ * device carves data/metadata views out of a mapped buffer that holds
+ * both interleaved).
+ */
+typedef struct NvmeMap {
+    QEMUIOVector iov;
+
+    struct {
+        void   *ptr;    /* host pointer (mapping or bounce buffer) */
+        size_t  len;    /* length of the mapping */
+        hwaddr  addr;   /* guest address (bounce buffer writeback) */
+        bool    bounce; /* malloc'd bounce buffer, not a mapping */
+    } *frag;
+
+    int nfrag;
+    int dir;            /* NVME_TX_DIRECTION_* */
+} NvmeMap;
 
 typedef struct NvmeRequest {
     struct NvmeSQueue       *sq;
@@ -144,7 +154,8 @@ typedef struct NvmeRequest {
     NvmeCqe                 cqe;
     NvmeCmd                 cmd;
     BlockAcctCookie         acct;
-    NvmeSg                  sg;
+    NvmeMap                 map;
+    QEMUIOVector            iov;    /* view into `map`, consumed by tx/blk_* */
     unsigned                flags;  /* device-defined request flags */
     QTAILQ_ENTRY(NvmeRequest)entry;
     /*
@@ -346,6 +357,12 @@ typedef struct NvmeCtrlBase {
  * command has been fetched and its request set up, and a decline
  * makes the core put the request back, leave the command unconsumed
  * and retry on the next run of the bottom half.
+ *
+ * 'bounce' selects the policy for data pointers in memory that
+ * address_space_map() cannot map directly (e.g. MMIO of another
+ * device): the test device bounces such fragments through a host
+ * buffer; other implementations may reject the command with a Data
+ * Transfer Error instead.
  */
 typedef struct NvmeBaseClass {
     PCIDeviceClass parent_class;
@@ -354,6 +371,8 @@ typedef struct NvmeBaseClass {
     uint16_t (*admin_cmd)(NvmeCtrlBase *n, NvmeRequest *req);
 
     bool (*sq_admit)(NvmeSQueue *sq, NvmeRequest *req);
+
+    bool bounce;
 } NvmeBaseClass;
 
 #define TYPE_NVME_BASE "nvme-base"
@@ -450,8 +469,24 @@ static inline uint16_t nvme_cid(NvmeRequest *req)
     return le16_to_cpu(req->cqe.cid);
 }
 
-uint16_t nvme_map_dptr(NvmeCtrlBase *n, NvmeSg *sg, size_t len,
-                       NvmeCmd *cmd);
+/*
+ * Eager data buffer mapping (core/dptr.c): nvme_map_dptr() maps the
+ * command's data pointer into host memory fragments and the callers
+ * carve whatever view they need out of the result.
+ */
+void nvme_map_init(NvmeMap *map, NvmeTxDirection dir);
+void nvme_map_unmap(NvmeCtrlBase *n, NvmeMap *map);
+uint16_t nvme_map_range(NvmeCtrlBase *n, NvmeMap *map, hwaddr addr, size_t len);
+uint16_t nvme_map_dptr(NvmeCtrlBase *n, NvmeMap *map, size_t len,
+                       NvmeCmd *cmd, NvmeTxDirection dir);
+uint16_t nvme_map_sgl(NvmeCtrlBase *n, NvmeMap *map, NvmeSglDescriptor sgl,
+                      size_t len, NvmeCmd *cmd);
+
+/* wrap `map`'s full iovec as the view `view` (no copy, no ownership) */
+static inline void nvme_map_wrap(NvmeMap *map, QEMUIOVector *view)
+{
+    qemu_iovec_init_external(view, map->iov.iov, map->iov.niov);
+}
 
 /*
  * Inline helpers shared by core/ and test/. These are small, hot
@@ -469,33 +504,6 @@ static inline void nvme_req_clear(NvmeRequest *req)
     req->flags = 0;
 }
 
-static inline void nvme_sg_init(NvmeCtrlBase *n, NvmeSg *sg, bool dma)
-{
-    if (dma) {
-        pci_dma_sglist_init(&sg->qsg, PCI_DEVICE(n), 0);
-        sg->flags = NVME_SG_DMA;
-    } else {
-        qemu_iovec_init(&sg->iov, 0);
-    }
-
-    sg->flags |= NVME_SG_ALLOC;
-}
-
-static inline void nvme_sg_unmap(NvmeSg *sg)
-{
-    if (!(sg->flags & NVME_SG_ALLOC)) {
-        return;
-    }
-
-    if (sg->flags & NVME_SG_DMA) {
-        qemu_sglist_destroy(&sg->qsg);
-    } else {
-        qemu_iovec_destroy(&sg->iov);
-    }
-
-    memset(sg, 0x0, sizeof(*sg));
-}
-
 static inline bool nvme_addr_is_iomem(NvmeCtrlBase *n, hwaddr addr)
 {
     hwaddr hi, lo;
@@ -507,34 +515,18 @@ static inline bool nvme_addr_is_iomem(NvmeCtrlBase *n, hwaddr addr)
 }
 
 /*
- * CMB/PMR-aware address operations, implemented by the test device
- * (test/ctrl.c). The test device is the only device model using the
- * core at this point, so core/dptr.c calls these directly; this
- * stays a direct call - the Sg-era address operations never become
- * class methods and are dropped wholesale again in "map data
- * buffers eagerly and drop NvmeSg".
- */
-uint16_t nvme_map_addr(NvmeCtrlBase *n, NvmeSg *sg, hwaddr addr, size_t len);
-int nvme_addr_read(NvmeCtrlBase *n, hwaddr addr, void *buf, int size);
-int nvme_addr_write(NvmeCtrlBase *n, hwaddr addr, const void *buf, int size);
-bool nvme_is_dma_addr(NvmeCtrlBase *n, hwaddr addr);
-
-/*
  * Functions implemented in core/dptr.c and core/dma.c. Declared here so
  * the device models can call them.
  */
-uint16_t nvme_map_sgl(NvmeCtrlBase *n, NvmeSg *sg, NvmeSglDescriptor sgl,
-                      size_t len, NvmeCmd *cmd);
-
-uint16_t nvme_tx(NvmeCtrlBase *n, NvmeSg *sg, void *ptr, uint32_t len,
+uint16_t nvme_tx(QEMUIOVector *iov, void *ptr, uint32_t len,
                  NvmeTxDirection dir);
 uint16_t nvme_c2h(NvmeCtrlBase *n, void *ptr, size_t len, uint32_t hostlen,
                   NvmeRequest *req);
 uint16_t nvme_h2c(NvmeCtrlBase *n, void *ptr, uint32_t len, NvmeRequest *req);
 
-void nvme_blk_read(BlockBackend *blk, int64_t offset, uint32_t align,
+void nvme_blk_read(BlockBackend *blk, int64_t offset,
                    BlockCompletionFunc *cb, NvmeRequest *req);
-void nvme_blk_write(BlockBackend *blk, int64_t offset, uint32_t align,
+void nvme_blk_write(BlockBackend *blk, int64_t offset,
                     BlockCompletionFunc *cb, NvmeRequest *req);
 
 /*

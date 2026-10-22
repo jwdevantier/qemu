@@ -308,7 +308,8 @@ void nvme_enqueue_req_completion(NvmeCQueue *cq, NvmeRequest *req)
                                       req->status, req->cmd.opcode);
     }
 
-    nvme_sg_unmap(&req->sg);
+    nvme_map_unmap(cq->ctrl, &req->map);
+    qemu_iovec_destroy(&req->iov);
 
     QTAILQ_REMOVE(&req->sq->out_req_list, req, entry);
     QTAILQ_INSERT_TAIL(&cq->req_list, req, entry);
@@ -646,7 +647,9 @@ void nvme_process_sq(NvmeSQueue *sq)
 
     while (!(nvme_sq_empty(sq) || QTAILQ_EMPTY(&sq->req_list))) {
         addr = sq->dma_addr + (sq->head << NVME_SQES);
-        if (nvme_addr_read(n, addr, (void *)&cmd, sizeof(cmd))) {
+        if (dma_memory_read(pci_get_address_space(PCI_DEVICE(n)), addr,
+                            (void *)&cmd, sizeof(cmd),
+                            MEMTXATTRS_UNSPECIFIED)) {
             trace_pci_nvme_err_addr_read(addr);
             trace_pci_nvme_err_cfs();
             stl_le_p(&n->bar.csts, NVME_CSTS_FAILED);

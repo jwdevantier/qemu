@@ -512,194 +512,6 @@ static bool nvme_update_ruh(NvmeCtrl *n, NvmeNamespace *ns, uint16_t pid)
     return true;
 }
 
-/* ------------------------------------------------------------------ */
-/* CMB/PMR address helpers (test-only, not in core/)                  */
-/* ------------------------------------------------------------------ */
-
-static bool nvme_addr_is_cmb(NvmeCtrl *n, hwaddr addr)
-{
-    hwaddr hi, lo;
-
-    if (!n->cmb.cmse) {
-        return false;
-    }
-
-    lo = n->params.legacy_cmb ? n->cmb.mem.addr : n->cmb.cba;
-    hi = lo + int128_get64(n->cmb.mem.size);
-
-    return addr >= lo && addr < hi;
-}
-
-static inline void *nvme_addr_to_cmb(NvmeCtrl *n, hwaddr addr)
-{
-    hwaddr base = n->params.legacy_cmb ? n->cmb.mem.addr : n->cmb.cba;
-    return memory_region_get_ram_ptr(&n->cmb.mem) + (addr - base);
-}
-
-static bool nvme_addr_is_pmr(NvmeCtrl *n, hwaddr addr)
-{
-    hwaddr hi;
-
-    if (!n->pmr.cmse) {
-        return false;
-    }
-
-    hi = n->pmr.cba + int128_get64(n->pmr.dev->mr.size);
-
-    return addr >= n->pmr.cba && addr < hi;
-}
-
-static inline void *nvme_addr_to_pmr(NvmeCtrl *n, hwaddr addr)
-{
-    return memory_region_get_ram_ptr(&n->pmr.dev->mr) + (addr - n->pmr.cba);
-}
-
-static uint16_t nvme_map_addr_cmb(NvmeCtrl *n, QEMUIOVector *iov, hwaddr addr,
-                                  size_t len)
-{
-    if (!len) {
-        return NVME_SUCCESS;
-    }
-
-    trace_pci_nvme_map_addr_cmb(addr, len);
-
-    if (!nvme_addr_is_cmb(n, addr) || !nvme_addr_is_cmb(n, addr + len - 1)) {
-        return NVME_DATA_TRAS_ERROR;
-    }
-
-    qemu_iovec_add(iov, nvme_addr_to_cmb(n, addr), len);
-
-    return NVME_SUCCESS;
-}
-
-static uint16_t nvme_map_addr_pmr(NvmeCtrl *n, QEMUIOVector *iov, hwaddr addr,
-                                  size_t len)
-{
-    if (!len) {
-        return NVME_SUCCESS;
-    }
-
-    if (!nvme_addr_is_pmr(n, addr) || !nvme_addr_is_pmr(n, addr + len - 1)) {
-        return NVME_DATA_TRAS_ERROR;
-    }
-
-    qemu_iovec_add(iov, nvme_addr_to_pmr(n, addr), len);
-
-    return NVME_SUCCESS;
-}
-
-/*
- * CMB/PMR-aware address operations, called directly by core/dptr.c
- * (the test device is the only device model using the core at this
- * point). This stays a direct call: the Sg-era address operations
- * never become class methods and are dropped wholesale again in
- * "map data buffers eagerly and drop NvmeSg".
- */
-uint16_t nvme_map_addr(NvmeCtrlBase *n, NvmeSg *sg, hwaddr addr,
-                              size_t len)
-{
-    NvmeCtrl *t = nvme_ctrl_of(n);
-    bool cmb = false, pmr = false;
-
-    if (!len) {
-        return NVME_SUCCESS;
-    }
-
-    trace_pci_nvme_map_addr(addr, len);
-
-    if (nvme_addr_is_iomem(n, addr)) {
-        return NVME_DATA_TRAS_ERROR;
-    }
-
-    if (nvme_addr_is_cmb(t, addr)) {
-        cmb = true;
-    } else if (nvme_addr_is_pmr(t, addr)) {
-        pmr = true;
-    }
-
-    if (cmb || pmr) {
-        if (sg->flags & NVME_SG_DMA) {
-            return NVME_INVALID_USE_OF_CMB | NVME_DNR;
-        }
-
-        if (sg->iov.niov + 1 > IOV_MAX) {
-            goto max_mappings_exceeded;
-        }
-
-        if (cmb) {
-            return nvme_map_addr_cmb(t, &sg->iov, addr, len);
-        } else {
-            return nvme_map_addr_pmr(t, &sg->iov, addr, len);
-        }
-    }
-
-    /* DMA path — same as core */
-    if (!(sg->flags & NVME_SG_DMA)) {
-        return NVME_INVALID_USE_OF_CMB | NVME_DNR;
-    }
-
-    if (sg->qsg.nsg + 1 > IOV_MAX) {
-        goto max_mappings_exceeded;
-    }
-
-    qemu_sglist_add(&sg->qsg, addr, len);
-    return NVME_SUCCESS;
-
-max_mappings_exceeded:
-    NVME_GUEST_ERR(pci_nvme_ub_too_many_mappings,
-                   "number of mappings exceed 1024");
-    return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
-}
-
-int nvme_addr_read(NvmeCtrlBase *n, hwaddr addr, void *buf, int size)
-{
-    NvmeCtrl *t = nvme_ctrl_of(n);
-    hwaddr hi = addr + size - 1;
-    if (hi < addr) {
-        return 1;
-    }
-
-    if (n->bar.cmbsz && nvme_addr_is_cmb(t, addr) && nvme_addr_is_cmb(t, hi)) {
-        memcpy(buf, nvme_addr_to_cmb(t, addr), size);
-        return 0;
-    }
-
-    if (nvme_addr_is_pmr(t, addr) && nvme_addr_is_pmr(t, hi)) {
-        memcpy(buf, nvme_addr_to_pmr(t, addr), size);
-        return 0;
-    }
-
-    return pci_dma_read(PCI_DEVICE(n), addr, buf, size);
-}
-
-int nvme_addr_write(NvmeCtrlBase *n, hwaddr addr, const void *buf,
-                                int size)
-{
-    NvmeCtrl *t = nvme_ctrl_of(n);
-    hwaddr hi = addr + size - 1;
-    if (hi < addr) {
-        return 1;
-    }
-
-    if (n->bar.cmbsz && nvme_addr_is_cmb(t, addr) && nvme_addr_is_cmb(t, hi)) {
-        memcpy(nvme_addr_to_cmb(t, addr), buf, size);
-        return 0;
-    }
-
-    if (nvme_addr_is_pmr(t, addr) && nvme_addr_is_pmr(t, hi)) {
-        memcpy(nvme_addr_to_pmr(t, addr), buf, size);
-        return 0;
-    }
-
-    return pci_dma_write(PCI_DEVICE(n), addr, buf, size);
-}
-
-bool nvme_is_dma_addr(NvmeCtrlBase *n, hwaddr addr)
-{
-    NvmeCtrl *t = nvme_ctrl_of(n);
-    return !(nvme_addr_is_cmb(t, addr) || nvme_addr_is_pmr(t, addr));
-}
-
 static bool nvme_nsid_valid(NvmeCtrl *n, uint32_t nsid)
 {
     return nsid &&
@@ -712,59 +524,60 @@ static inline bool nvme_msix_enabled(NvmeCtrl *n)
 }
 
 /*
- * When metadata is transferred as extended LBAs, the DPTR mapped into `sg`
- * holds both data and metadata. This function splits the data and metadata
- * into two separate QSG/IOVs.
+ * When metadata is transferred as extended LBAs, the eagerly mapped DPTR
+ * buffer holds both data and metadata, interleaved per LBA. Carve a view
+ * out of such a buffer: `take` bytes every `stride` bytes, starting `skip`
+ * bytes into the stream. `view` must be an uninitialized or destroyed
+ * QEMUIOVector; the caller owns it.
+ *
+ * The mapping (`map`) must be complete when this is called: `view` may
+ * wrap `map`'s iovec storage, so appending to `map` afterwards would
+ * leave the view dangling.
  */
-static void nvme_sg_split(NvmeSg *sg, NvmeNamespace *ns, NvmeSg *data,
-                          NvmeSg *mdata)
+static void nvme_map_view(NvmeMap *map, QEMUIOVector *view, uint32_t take,
+                          uint32_t stride, uint32_t skip)
 {
-    NvmeSg *dst = data;
-    uint32_t trans_len, count = ns->base.lbasz;
-    uint64_t offset = 0;
-    bool dma = sg->flags & NVME_SG_DMA;
-    size_t sge_len;
-    size_t sg_len = dma ? sg->qsg.size : sg->iov.size;
-    int sg_idx = 0;
+    const struct iovec *iov = map->iov.iov;
+    uint64_t off = skip;
+    size_t pos = 0;
+    int i;
 
-    assert(sg->flags & NVME_SG_ALLOC);
+    assert(!view->iov);
 
-    while (sg_len) {
-        sge_len = dma ? sg->qsg.sg[sg_idx].len : sg->iov.iov[sg_idx].iov_len;
+    qemu_iovec_init(view, 0);
 
-        trans_len = MIN(sg_len, count);
-        trans_len = MIN(trans_len, sge_len - offset);
+    for (i = 0; i < map->iov.niov && off < map->iov.size; i++) {
+        size_t epos = pos;
+        size_t eend = pos + iov[i].iov_len;
 
-        if (dst) {
-            if (dma) {
-                qemu_sglist_add(&dst->qsg, sg->qsg.sg[sg_idx].base + offset,
-                                trans_len);
+        while (off < eend && off < map->iov.size) {
+            size_t s = MAX(off, epos);
+            size_t e = MIN(off + take, eend);
+
+            qemu_iovec_add(view, (uint8_t *)iov[i].iov_base + (s - epos),
+                           e - s);
+
+            if (off + take <= eend) {
+                off += stride;
             } else {
-                qemu_iovec_add(&dst->iov,
-                               sg->iov.iov[sg_idx].iov_base + offset,
-                               trans_len);
+                /* the chunk crosses into the next fragment */
+                break;
             }
         }
 
-        sg_len -= trans_len;
-        count -= trans_len;
-        offset += trans_len;
-
-        if (count == 0) {
-            dst = (dst == data) ? mdata : data;
-            count = (dst == data) ? ns->base.lbasz : ns->base.lbaf.ms;
-        }
-
-        if (sge_len == offset) {
-            offset = 0;
-            sg_idx++;
-        }
+        pos = eend;
     }
 }
 
-static uint16_t nvme_map_mptr(NvmeCtrlBase *n, NvmeSg *sg, size_t len,
+/*
+ * Map the separate metadata buffer (MPTR) into `map`, which must have
+ * been initialized by the caller (nvme_map_init()). On error, releasing
+ * any partial mapping is the caller's responsibility.
+ */
+static uint16_t nvme_map_mptr(NvmeCtrlBase *n, NvmeMap *map, size_t len,
                               NvmeCmd *cmd)
 {
+    AddressSpace *as = pci_get_address_space(PCI_DEVICE(n));
     int psdt = NVME_CMD_FLAGS_PSDT(cmd->flags);
     hwaddr mptr = le64_to_cpu(cmd->mptr);
     uint16_t status;
@@ -772,11 +585,12 @@ static uint16_t nvme_map_mptr(NvmeCtrlBase *n, NvmeSg *sg, size_t len,
     if (psdt == NVME_PSDT_SGL_MPTR_SGL) {
         NvmeSglDescriptor sgl;
 
-        if (nvme_addr_read(n, mptr, &sgl, sizeof(sgl))) {
+        if (dma_memory_read(as, mptr, &sgl, sizeof(sgl),
+                            MEMTXATTRS_UNSPECIFIED)) {
             return NVME_DATA_TRAS_ERROR;
         }
 
-        status = nvme_map_sgl(n, sg, sgl, len, cmd);
+        status = nvme_map_sgl(n, map, sgl, len, cmd);
         if (status && (status & 0x7ff) == NVME_DATA_SGL_LEN_INVALID) {
             status = NVME_MD_SGL_LEN_INVALID | NVME_DNR;
         }
@@ -784,16 +598,11 @@ static uint16_t nvme_map_mptr(NvmeCtrlBase *n, NvmeSg *sg, size_t len,
         return status;
     }
 
-    nvme_sg_init(n, sg, nvme_is_dma_addr(n, mptr));
-    status = nvme_map_addr(n, sg, mptr, len);
-    if (status) {
-        nvme_sg_unmap(sg);
-    }
-
-    return status;
+    return nvme_map_range(n, map, mptr, len);
 }
 
-static uint16_t nvme_map_data(NvmeCtrl *n, uint32_t nlb, NvmeRequest *req)
+static uint16_t nvme_map_data(NvmeCtrl *n, uint32_t nlb, NvmeRequest *req,
+                              NvmeTxDirection dir)
 {
     NvmeNamespace *ns = nvme_ns_of(req->ns);
     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
@@ -804,109 +613,59 @@ static uint16_t nvme_map_data(NvmeCtrl *n, uint32_t nlb, NvmeRequest *req)
 
     if (nvme_ns_ext(&ns->base) &&
         !(pi && pract && ns->base.lbaf.ms == nvme_pi_tuple_size(ns))) {
-        NvmeSg sg;
-
+        /* the buffer holds interleaved data and metadata */
         len += nvme_m2b(&ns->base, nlb);
-
-        status = nvme_map_dptr(&n->base, &sg, len, &req->cmd);
-        if (status) {
-            return status;
-        }
-
-        nvme_sg_init(&n->base, &req->sg, sg.flags & NVME_SG_DMA);
-        nvme_sg_split(&sg, ns, &req->sg, NULL);
-        nvme_sg_unmap(&sg);
-
-        return NVME_SUCCESS;
     }
 
-    return nvme_map_dptr(&n->base, &req->sg, len, &req->cmd);
+    status = nvme_map_dptr(&n->base, &req->map, len, &req->cmd, dir);
+    if (status) {
+        return status;
+    }
+
+    if (nvme_ns_ext(&ns->base) &&
+        !(pi && pract && ns->base.lbaf.ms == nvme_pi_tuple_size(ns))) {
+        /* expose the data part to the block layer */
+        nvme_map_view(&req->map, &req->iov, ns->base.lbasz,
+                      ns->base.lbasz + ns->base.lbaf.ms, 0);
+    } else {
+        nvme_map_wrap(&req->map, &req->iov);
+    }
+
+    return NVME_SUCCESS;
 }
 
 static uint16_t nvme_map_mdata(NvmeCtrl *n, uint32_t nlb, NvmeRequest *req)
 {
     NvmeNamespace *ns = nvme_ns_of(req->ns);
+    NvmeTxDirection dir = req->cmd.opcode == NVME_CMD_READ ?
+        NVME_TX_DIRECTION_FROM_DEVICE : NVME_TX_DIRECTION_TO_DEVICE;
     size_t len = nvme_m2b(&ns->base, nlb);
     uint16_t status;
 
     if (nvme_ns_ext(&ns->base)) {
-        NvmeSg sg;
-
+        /* the buffer holds interleaved data and metadata */
         len += nvme_l2b(&ns->base, nlb);
 
-        status = nvme_map_dptr(&n->base, &sg, len, &req->cmd);
+        status = nvme_map_dptr(&n->base, &req->map, len, &req->cmd, dir);
         if (status) {
             return status;
         }
 
-        nvme_sg_init(&n->base, &req->sg, sg.flags & NVME_SG_DMA);
-        nvme_sg_split(&sg, ns, NULL, &req->sg);
-        nvme_sg_unmap(&sg);
+        /* expose the metadata part to the block layer */
+        nvme_map_view(&req->map, &req->iov, ns->base.lbaf.ms,
+                      ns->base.lbasz + ns->base.lbaf.ms, ns->base.lbasz);
 
         return NVME_SUCCESS;
     }
 
-    return nvme_map_mptr(&n->base, &req->sg, len, &req->cmd);
-}
+    nvme_map_init(&req->map, dir);
 
-static uint16_t nvme_tx_interleaved(NvmeCtrlBase *n, NvmeSg *sg, uint8_t *ptr,
-                                    uint32_t len, uint32_t bytes,
-                                    int32_t skip_bytes, int64_t offset,
-                                    NvmeTxDirection dir)
-{
-    hwaddr addr;
-    uint32_t trans_len, count = bytes;
-    bool dma = sg->flags & NVME_SG_DMA;
-    int64_t sge_len;
-    int sg_idx = 0;
-    int ret;
-
-    assert(sg->flags & NVME_SG_ALLOC);
-
-    while (len) {
-        sge_len = dma ? sg->qsg.sg[sg_idx].len : sg->iov.iov[sg_idx].iov_len;
-
-        if (sge_len - offset < 0) {
-            offset -= sge_len;
-            sg_idx++;
-            continue;
-        }
-
-        if (sge_len == offset) {
-            offset = 0;
-            sg_idx++;
-            continue;
-        }
-
-        trans_len = MIN(len, count);
-        trans_len = MIN(trans_len, sge_len - offset);
-
-        if (dma) {
-            addr = sg->qsg.sg[sg_idx].base + offset;
-        } else {
-            addr = (hwaddr)(uintptr_t)sg->iov.iov[sg_idx].iov_base + offset;
-        }
-
-        if (dir == NVME_TX_DIRECTION_TO_DEVICE) {
-            ret = nvme_addr_read(n, addr, ptr, trans_len);
-        } else {
-            ret = nvme_addr_write(n, addr, ptr, trans_len);
-        }
-
-        if (ret) {
-            return NVME_DATA_TRAS_ERROR;
-        }
-
-        ptr += trans_len;
-        len -= trans_len;
-        count -= trans_len;
-        offset += trans_len;
-
-        if (count == 0) {
-            count = bytes;
-            offset += skip_bytes;
-        }
+    status = nvme_map_mptr(&n->base, &req->map, len, &req->cmd);
+    if (status) {
+        return status;
     }
+
+    nvme_map_wrap(&req->map, &req->iov);
 
     return NVME_SUCCESS;
 }
@@ -921,11 +680,21 @@ uint16_t nvme_bounce_data(NvmeCtrlBase *n, void *ptr, uint32_t len,
 
     if (nvme_ns_ext(&ns->base) &&
         !(pi && pract && ns->base.lbaf.ms == nvme_pi_tuple_size(ns))) {
-        return nvme_tx_interleaved(n, &req->sg, ptr, len, ns->base.lbasz,
-                                   ns->base.lbaf.ms, 0, dir);
+        QEMUIOVector view = { 0 };
+        uint16_t status;
+
+        /* transfer the data part of the interleaved buffer */
+        nvme_map_view(&req->map, &view, ns->base.lbasz,
+                      ns->base.lbasz + ns->base.lbaf.ms, 0);
+
+        status = nvme_tx(&view, ptr, len, dir);
+
+        qemu_iovec_destroy(&view);
+
+        return status;
     }
 
-    return nvme_tx(n, &req->sg, ptr, len, dir);
+    return nvme_tx(&req->iov, ptr, len, dir);
 }
 
 uint16_t nvme_bounce_mdata(NvmeCtrlBase *n, void *ptr, uint32_t len,
@@ -935,18 +704,36 @@ uint16_t nvme_bounce_mdata(NvmeCtrlBase *n, void *ptr, uint32_t len,
     uint16_t status;
 
     if (nvme_ns_ext(&ns->base)) {
-        return nvme_tx_interleaved(n, &req->sg, ptr, len, ns->base.lbaf.ms,
-                                   ns->base.lbasz, ns->base.lbasz, dir);
+        QEMUIOVector view = { 0 };
+
+        /* transfer the metadata part of the interleaved buffer */
+        nvme_map_view(&req->map, &view, ns->base.lbaf.ms,
+                      ns->base.lbasz + ns->base.lbaf.ms, ns->base.lbasz);
+
+        status = nvme_tx(&view, ptr, len, dir);
+
+        qemu_iovec_destroy(&view);
+
+        return status;
     }
 
-    nvme_sg_unmap(&req->sg);
+    /*
+     * The data buffer mapping is no longer needed; reuse `req->map`
+     * for the separate metadata buffer (MPTR).
+     */
+    nvme_map_unmap(n, &req->map);
+    qemu_iovec_destroy(&req->iov);
 
-    status = nvme_map_mptr(n, &req->sg, len, &req->cmd);
+    nvme_map_init(&req->map, dir);
+
+    status = nvme_map_mptr(n, &req->map, len, &req->cmd);
     if (status) {
         return status;
     }
 
-    return nvme_tx(n, &req->sg, ptr, len, dir);
+    nvme_map_wrap(&req->map, &req->iov);
+
+    return nvme_tx(&req->iov, ptr, len, dir);
 }
 
 static void nvme_process_aers(void *opaque)
@@ -1595,7 +1382,13 @@ static void nvme_rw_cb(void *opaque, int ret)
         if (nvme_ns_ext(&ns->base) || req->cmd.mptr) {
             uint16_t status;
 
-            nvme_sg_unmap(&req->sg);
+            /*
+             * The data buffer mapping is no longer needed; remap the
+             * metadata (interleaved or separate) and transfer it.
+             */
+            nvme_map_unmap(&nvme_ctrl(req)->base, &req->map);
+            qemu_iovec_destroy(&req->iov);
+
             status = nvme_map_mdata(nvme_ctrl(req), nlb, req);
             if (status) {
                 ret = -EFAULT;
@@ -1603,10 +1396,10 @@ static void nvme_rw_cb(void *opaque, int ret)
             }
 
             if (req->cmd.opcode == NVME_CMD_READ) {
-                return nvme_blk_read(blk, offset, 1, nvme_rw_complete_cb, req);
+                return nvme_blk_read(blk, offset, nvme_rw_complete_cb, req);
             }
 
-            return nvme_blk_write(blk, offset, 1, nvme_rw_complete_cb, req);
+            return nvme_blk_write(blk, offset, nvme_rw_complete_cb, req);
         }
     }
 
@@ -2860,10 +2653,13 @@ static uint16_t nvme_compare(NvmeCtrl *n, NvmeRequest *req)
         }
     }
 
-    status = nvme_map_dptr(&n->base, &req->sg, len, &req->cmd);
+    status = nvme_map_dptr(&n->base, &req->map, len, &req->cmd,
+                           NVME_TX_DIRECTION_TO_DEVICE);
     if (status) {
         return status;
     }
+
+    nvme_map_wrap(&req->map, &req->iov);
 
     ctx = g_new(struct nvme_compare_ctx, 1);
     ctx->data.bounce = g_malloc(data_len);
@@ -3064,7 +2860,7 @@ static uint16_t nvme_read(NvmeCtrl *n, NvmeRequest *req)
         return nvme_dif_rw(n, req);
     }
 
-    status = nvme_map_data(n, nlb, req);
+    status = nvme_map_data(n, nlb, req, NVME_TX_DIRECTION_FROM_DEVICE);
     if (status) {
         goto invalid;
     }
@@ -3073,7 +2869,7 @@ static uint16_t nvme_read(NvmeCtrl *n, NvmeRequest *req)
 
     block_acct_start(blk_get_stats(blk), &req->acct, data_size,
                      BLOCK_ACCT_READ);
-    nvme_blk_read(blk, data_offset, BDRV_SECTOR_SIZE, nvme_rw_cb, req);
+    nvme_blk_read(blk, data_offset, nvme_rw_cb, req);
     return NVME_NO_COMPLETE;
 
 invalid:
@@ -3236,14 +3032,14 @@ static uint16_t nvme_do_write(NvmeCtrl *n, NvmeRequest *req, bool append,
     }
 
     if (!wrz) {
-        status = nvme_map_data(n, nlb, req);
+        status = nvme_map_data(n, nlb, req, NVME_TX_DIRECTION_TO_DEVICE);
         if (status) {
             goto invalid;
         }
 
         block_acct_start(blk_get_stats(blk), &req->acct, data_size,
                          BLOCK_ACCT_WRITE);
-        nvme_blk_write(blk, data_offset, BDRV_SECTOR_SIZE, nvme_rw_cb, req);
+        nvme_blk_write(blk, data_offset, nvme_rw_cb, req);
     } else {
         req->aiocb = blk_aio_pwrite_zeroes(blk, data_offset, data_size,
                                            BDRV_REQ_MAY_UNMAP, nvme_rw_cb,
@@ -8606,6 +8402,7 @@ static void nvme_exit(PCIDevice *pci_dev)
     g_free(n->base.sq);
     g_free(n->base.aer_reqs);
 
+
     /* Only one of the `spdm_socket`s below should have been setup */
     assert(!(pci_dev->doe_spdm.spdm_socket > 0 && n->base.spdm_socket >= 0));
     if (pci_dev->doe_spdm.spdm_socket > 0) {
@@ -9020,8 +8817,8 @@ static bool pre_save_validate_aer_req(NvmeRequest *req, Error **errp)
         return false;
     }
 
-    if (req->sg.flags & NVME_SG_ALLOC) {
-        error_setg(errp, "unexpected NVME_SG_ALLOC flag in req->sg.flags");
+    if (req->map.nfrag || req->map.iov.niov) {
+        error_setg(errp, "unexpected in-flight data buffer mapping");
         return false;
     }
 
@@ -9050,8 +8847,8 @@ static bool pre_save_validate_cq_req(NvmeRequest *req, Error **errp)
         return false;
     }
 
-    if (req->sg.flags & NVME_SG_ALLOC) {
-        error_setg(errp, "unexpected NVME_SG_ALLOC flag in req->sg.flags");
+    if (req->map.nfrag || req->map.iov.niov) {
+        error_setg(errp, "unexpected in-flight data buffer mapping");
         return false;
     }
 
@@ -9458,6 +9255,10 @@ static void nvme_class_init(ObjectClass *oc, const void *data)
 
     /* the test device submission admission (atomic write batching) */
     bc->sq_admit = nvme_sq_admit;
+
+    /* the test device bounces non-mappable data pointers (vnvme
+     * rejects them with a Data Transfer Error) */
+    bc->bounce = true;
 
     pc->realize = nvme_realize;
     pc->config_write = nvme_pci_write_config;

@@ -633,10 +633,15 @@ uint16_t nvme_dif_rw(NvmeCtrl *n, NvmeRequest *req)
         mapped_len += mlen;
     }
 
-    status = nvme_map_dptr(&n->base, &req->sg, mapped_len, &req->cmd);
+    status = nvme_map_dptr(&n->base, &req->map, mapped_len, &req->cmd,
+                           req->cmd.opcode == NVME_CMD_READ ?
+                           NVME_TX_DIRECTION_FROM_DEVICE :
+                           NVME_TX_DIRECTION_TO_DEVICE);
     if (status) {
         goto err;
     }
+
+    nvme_map_wrap(&req->map, &req->iov);
 
     ctx->data.bounce = g_malloc(len);
 

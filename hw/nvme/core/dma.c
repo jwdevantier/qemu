@@ -5,6 +5,11 @@
  * I/O) for the NVMe device models. This
  * code is in the QEMU security boundary.
  *
+ * All transfers operate on eagerly mapped host buffers (NvmeMap) or views
+ * carved out of them (NvmeRequest::iov); there is no scatter/gather
+ * indirection left, so the block layer path is a plain blk_aio_preadv/
+ * pwritev.
+ *
  * Copyright (c) 2012, Intel Corporation
  * Copyright (c) 2025 Samsung Electronics Co., Ltd.
  *
@@ -18,25 +23,18 @@
 #include "hw/nvme/core/nvme.h"
 #include "hw/nvme/trace.h"
 
-uint16_t nvme_tx(NvmeCtrlBase *n, NvmeSg *sg, void *ptr, uint32_t len,
+/*
+ * Note that the transfer length may exceed the size of the mapping
+ * (`hostlen` on the c2h path): short host buffers are tolerated and
+ * the remaining bytes are simply left as-is.
+ */
+uint16_t nvme_tx(QEMUIOVector *iov, void *ptr, uint32_t len,
                  NvmeTxDirection dir)
 {
-    assert(sg->flags & NVME_SG_ALLOC);
-
-    if (sg->flags & NVME_SG_DMA) {
-        const MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
-
-        if (dir == NVME_TX_DIRECTION_TO_DEVICE) {
-            dma_buf_write(ptr, len, NULL, &sg->qsg, attrs);
-        } else {
-            dma_buf_read(ptr, len, NULL, &sg->qsg, attrs);
-        }
+    if (dir == NVME_TX_DIRECTION_TO_DEVICE) {
+        qemu_iovec_to_buf(iov, 0, ptr, len);
     } else {
-        if (dir == NVME_TX_DIRECTION_TO_DEVICE) {
-            qemu_iovec_to_buf(&sg->iov, 0, ptr, len);
-        } else {
-            qemu_iovec_from_buf(&sg->iov, 0, ptr, len);
-        }
+        qemu_iovec_from_buf(iov, 0, ptr, len);
     }
 
     return NVME_SUCCESS;
@@ -47,46 +45,50 @@ uint16_t nvme_c2h(NvmeCtrlBase *n, void *ptr, size_t len, uint32_t hostlen,
 {
     uint16_t status;
 
-    status = nvme_map_dptr(n, &req->sg, hostlen, &req->cmd);
+    /*
+     * Map the host buffer, not the payload size: mapping `len` could
+     * make nvme_map_prp() misinterpret PRP2 as a page pointer instead
+     * of a PRP List pointer when the payload spans more than one but
+     * less than two pages and the host buffer is larger.
+     */
+    status = nvme_map_dptr(n, &req->map, hostlen, &req->cmd,
+                           NVME_TX_DIRECTION_FROM_DEVICE);
     if (status) {
         return status;
     }
 
-    return nvme_tx(n, &req->sg, ptr, len, NVME_TX_DIRECTION_FROM_DEVICE);
+    nvme_map_wrap(&req->map, &req->iov);
+
+    return nvme_tx(&req->iov, ptr, len, NVME_TX_DIRECTION_FROM_DEVICE);
 }
 
 uint16_t nvme_h2c(NvmeCtrlBase *n, void *ptr, uint32_t len, NvmeRequest *req)
 {
     uint16_t status;
 
-    status = nvme_map_dptr(n, &req->sg, len, &req->cmd);
+    status = nvme_map_dptr(n, &req->map, len, &req->cmd,
+                           NVME_TX_DIRECTION_TO_DEVICE);
     if (status) {
         return status;
     }
 
-    return nvme_tx(n, &req->sg, ptr, len, NVME_TX_DIRECTION_TO_DEVICE);
+    nvme_map_wrap(&req->map, &req->iov);
+
+    return nvme_tx(&req->iov, ptr, len, NVME_TX_DIRECTION_TO_DEVICE);
 }
 
-void nvme_blk_read(BlockBackend *blk, int64_t offset, uint32_t align,
+void nvme_blk_read(BlockBackend *blk, int64_t offset,
                    BlockCompletionFunc *cb, NvmeRequest *req)
 {
-    assert(req->sg.flags & NVME_SG_ALLOC);
+    assert(req->iov.niov);
 
-    if (req->sg.flags & NVME_SG_DMA) {
-        req->aiocb = dma_blk_read(blk, &req->sg.qsg, offset, align, cb, req);
-    } else {
-        req->aiocb = blk_aio_preadv(blk, offset, &req->sg.iov, 0, cb, req);
-    }
+    req->aiocb = blk_aio_preadv(blk, offset, &req->iov, 0, cb, req);
 }
 
-void nvme_blk_write(BlockBackend *blk, int64_t offset, uint32_t align,
+void nvme_blk_write(BlockBackend *blk, int64_t offset,
                     BlockCompletionFunc *cb, NvmeRequest *req)
 {
-    assert(req->sg.flags & NVME_SG_ALLOC);
+    assert(req->iov.niov);
 
-    if (req->sg.flags & NVME_SG_DMA) {
-        req->aiocb = dma_blk_write(blk, &req->sg.qsg, offset, align, cb, req);
-    } else {
-        req->aiocb = blk_aio_pwritev(blk, offset, &req->sg.iov, 0, cb, req);
-    }
+    req->aiocb = blk_aio_pwritev(blk, offset, &req->iov, 0, cb, req);
 }

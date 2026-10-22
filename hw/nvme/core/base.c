@@ -2,9 +2,8 @@
  * QEMU NVM Express — abstract device base class
  *
  * Registers the abstract 'nvme-base' type that the NVMe device models
- * derive from; its class struct (NvmeBaseClass, see core/nvme.h)
- * carries the device dispatch hooks. This code is in the QEMU
- * security boundary.
+ * derive from. This code is in the
+ * QEMU security boundary.
  *
  * Copyright (c) 2025 Samsung Electronics Co., Ltd.
  *
@@ -18,9 +17,11 @@
 static void nvme_base_class_init(ObjectClass *oc, const void *data)
 {
     /*
-     * io_cmd/admin_cmd have no default: every device must install its
-     * command dispatch in its own class_init. sq_admit is optional
-     * and defaults to NULL.
+     * No defaults to install: io_cmd/admin_cmd have no default (every
+     * device must install its command dispatch in its own class_init),
+     * sq_admit is optional and defaults to NULL, and 'bounce'
+     * defaults to false (reject non-mappable data pointers; only the
+     * test device opts into bouncing).
      */
 }
 
