@@ -450,10 +450,6 @@ typedef struct NvmeCtrl {
     uint64_t    host_timestamp;                 /* Timestamp sent by the host */
     uint64_t    timestamp_set_qemu_clock_ms;    /* QEMU clock time */
 
-    uint64_t    dbbuf_dbs;
-    uint64_t    dbbuf_eis;
-    bool        dbbuf_enabled;
-
     struct {
         uint32_t acs[256];
         struct {

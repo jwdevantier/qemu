@@ -287,8 +287,17 @@ typedef struct NvmeCtrlBase {
 
     uint32_t    dn; /* Disable Normal */
 
-    /* Socket mapping to SPDM over NVMe Security In/Out commands */
+/* Socket mapping to SPDM over NVMe Security In/Out commands */
     int spdm_socket;
+
+    /*
+     * Shadow doorbell buffer (DBBUF) state. The shadow addresses are
+     * negotiated with the Doorbell Buffer Config admin command
+     * (nvme_dbbuf_config, core/queue.c).
+     */
+    uint64_t    dbbuf_dbs;
+    uint64_t    dbbuf_eis;
+    bool        dbbuf_enabled;
 
     /* Migration-related stuff */
     Error *migration_blocker;
@@ -456,8 +465,9 @@ static inline bool nvme_addr_is_iomem(NvmeCtrlBase *n, hwaddr addr)
  *
  *  - nvme_cq_setup()/nvme_sq_setup() are called when a
  *    queue is created or restored, before the queue is attached to
- *    the controller; they wire up doorbell buffer shadow addresses
- *    and ioeventfd on top of the common queue initialization.
+ *    the controller; they wire up ioeventfd on top of the common
+ *    queue initialization (the doorbell buffer shadow addresses are
+ *    wired up in core since DBBUF support is shared).
  *  - nvme_cq_teardown()/nvme_sq_teardown() tear the ioeventfd wiring
  *    down when a queue is freed.
  *  - nvme_process_sq() is the submission queue bottom half callback
@@ -516,5 +526,15 @@ void nvme_sq_cancel_inflight(NvmeSQueue *sq, uint16_t status);
 void nvme_free_sq(NvmeSQueue *sq);
 uint16_t nvme_del_sq(NvmeCtrlBase *n, NvmeRequest *req);
 uint16_t nvme_create_sq(NvmeCtrlBase *n, NvmeRequest *req);
+
+/*
+ * Shadow doorbell buffer (DBBUF) support, common to both devices.
+ * The helpers are also used by the test device ioeventfd notifiers.
+ */
+void nvme_cq_set_eventidx(const NvmeCQueue *cq);
+bool nvme_cq_update_head(NvmeCQueue *cq);
+void nvme_sq_set_eventidx(const NvmeSQueue *sq);
+bool nvme_sq_update_tail(NvmeSQueue *sq);
+uint16_t nvme_dbbuf_config(NvmeCtrlBase *n, const NvmeRequest *req);
 
 #endif /* HW_NVME_NVME_H */

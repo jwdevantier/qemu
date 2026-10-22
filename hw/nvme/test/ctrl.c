@@ -650,43 +650,6 @@ max_mappings_exceeded:
     return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
 }
 
-/*
- * Check that the guest range [addr, addr + len) is directly accessible
- * memory (guest RAM, CMB or PMR) for the given access direction. Used
- * to validate the shadow doorbell buffer placement: since that memory
- * is accessed on the submission/completion paths without bouncing, an
- * unmappable range would leave the host polling on a stale shadow
- * buffer.
- */
-static bool nvme_addr_is_mappable(NvmeCtrl *n, hwaddr addr, size_t len,
-                                  bool is_write)
-{
-    AddressSpace *as = pci_get_address_space(PCI_DEVICE(n));
-    const MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
-
-    if (UINT64_MAX - addr < len) {
-        return false;
-    }
-
-    while (len) {
-        hwaddr xlat;
-        MemoryRegion *mr;
-        hwaddr clen = len;
-
-        mr = address_space_translate(as, addr, &xlat, &clen, is_write, attrs);
-
-        if (unlikely(!clen) ||
-            !memory_access_is_direct(mr, is_write, attrs)) {
-            return false;
-        }
-
-        addr += clen;
-        len -= clen;
-    }
-
-    return true;
-}
-
 int nvme_addr_read(NvmeCtrlBase *n, hwaddr addr, void *buf, int size)
 {
     NvmeCtrl *t = nvme_ctrl_of(n);
@@ -1007,29 +970,6 @@ uint16_t nvme_bounce_mdata(NvmeCtrlBase *n, void *ptr, uint32_t len,
     }
 
     return nvme_tx(n, &req->sg, ptr, len, dir);
-}
-
-static void nvme_cq_set_eventidx(const NvmeCQueue *cq)
-{
-    trace_pci_nvme_cq_set_eventidx(cq->cqid, cq->head);
-
-    stl_le_pci_dma(PCI_DEVICE(cq->ctrl), cq->ei_addr, cq->head,
-                   MEMTXATTRS_UNSPECIFIED);
-}
-
-static bool nvme_cq_update_head(NvmeCQueue *cq)
-{
-    uint32_t head = cq->head;
-
-    ldl_le_pci_dma(PCI_DEVICE(cq->ctrl), cq->db_addr, &cq->head,
-                   MEMTXATTRS_UNSPECIFIED);
-
-    if (head != cq->head) {
-        trace_pci_nvme_cq_update_head(cq->cqid, head, cq->head);
-        return true;
-    }
-
-    return false;
 }
 
 /*
@@ -4249,16 +4189,12 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeRequest *req)
 }
 
 /*
- * Shadow doorbell buffer ioeventfd wiring (the sq helpers and the
- * submission processing are defined further down): when a doorbell
- * buffer is configured, an event notifier is registered on the
- * queue's doorbell offset of the MMIO region so doorbell writes can
- * be dispatched by the accelerator without trapping. The
- * authoritative queue indices are then taken from the shadow buffers.
+ * Shadow doorbell buffer ioeventfd wiring: when a doorbell buffer is
+ * configured, an event notifier is registered on the queue's doorbell
+ * offset of the MMIO region so doorbell writes can be dispatched by
+ * the accelerator without trapping. The authoritative queue indices
+ * are then taken from the shadow buffers.
  */
-static bool nvme_sq_update_tail(NvmeSQueue *sq);
-static void nvme_sq_set_eventidx(const NvmeSQueue *sq);
-
 static void nvme_cq_notifier(EventNotifier *e)
 {
     NvmeCQueue *cq = container_of(e, NvmeCQueue, notifier);
@@ -4362,20 +4298,15 @@ static void nvme_sq_init_notifier(NvmeSQueue *sq)
 }
 
 /*
- * Test device SQ setup, called directly from core/queue.c: dbbuf shadow
- * wiring and ioeventfd registration before the common setup.
+ * Test device SQ setup, called directly from core/queue.c: ioeventfd
+ * registration (test device only) before the common setup.
  */
 void nvme_sq_setup(NvmeSQueue *sq)
 {
     NvmeCtrl *n = nvme_ctrl_from_sq(sq);
 
-    if (n->dbbuf_enabled) {
-        sq->db_addr = n->dbbuf_dbs + (sq->sqid << 3);
-        sq->ei_addr = n->dbbuf_eis + (sq->sqid << 3);
-
-        if (sq->sqid != 0) {
-            nvme_sq_init_notifier(sq);
-        }
+    if (n->base.dbbuf_enabled && sq->sqid != 0) {
+        nvme_sq_init_notifier(sq);
     }
 
     nvme_init_sq_common(sq);
@@ -4975,21 +4906,15 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeRequest *req)
 }
 
 /*
- * Test device CQ setup, called directly from core/queue.c: dbbuf shadow
- * wiring and ioeventfd registration before the common setup.
+ * Test device CQ setup, called directly from core/queue.c: ioeventfd
+ * registration (test device only) before the common setup.
  */
 void nvme_cq_setup(NvmeCQueue *cq)
 {
     NvmeCtrl *n = nvme_ctrl_from_cq(cq);
-    uint16_t cqid = cq->cqid;
 
-    if (n->dbbuf_enabled) {
-        cq->db_addr = n->dbbuf_dbs + (cqid << 3) + (1 << 2);
-        cq->ei_addr = n->dbbuf_eis + (cqid << 3) + (1 << 2);
-
-        if (cqid != 0) {
-            nvme_cq_init_notifier(cq);
-        }
+    if (n->base.dbbuf_enabled && cq->cqid != 0) {
+        nvme_cq_init_notifier(cq);
     }
 
     nvme_init_cq_common(cq);
@@ -6670,77 +6595,6 @@ static uint16_t nvme_virt_mngmt(NvmeCtrl *n, NvmeRequest *req)
     }
 }
 
-static uint16_t nvme_dbbuf_config(NvmeCtrl *n, const NvmeRequest *req)
-{
-    PCIDevice *pci = PCI_DEVICE(n);
-    uint64_t dbs_addr = le64_to_cpu(req->cmd.dptr.prp1);
-    uint64_t eis_addr = le64_to_cpu(req->cmd.dptr.prp2);
-    int i;
-
-    /* Address should be page aligned */
-    if (dbs_addr & (n->base.page_size - 1) || eis_addr & (n->base.page_size - 1)) {
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
-    /*
-     * The shadow buffers are accessed without bouncing: the device
-     * initializes the shadow doorbells, writes the event indexes on
-     * every consumption, and re-reads the doorbells when a queue is
-     * kicked. Validate the ranges up front instead of silently
-     * dropping the per-queue writes below - a stale shadow buffer can
-     * wedge a host polling on it. CAP.DSTRD is 0, so the entries are 8
-     * bytes apart and the last byte touched (the last cq doorbell at
-     * an offset of 4, written as a dword) is (num_queues << 3) - 1.
-     */
-    if (unlikely(!nvme_addr_is_mappable(n, dbs_addr,
-                                        (size_t)n->base.num_queues << 3, true)) ||
-        unlikely(!nvme_addr_is_mappable(n, eis_addr,
-                                        (size_t)n->base.num_queues << 3, true))) {
-        trace_pci_nvme_err_dbbuf_addr(dbs_addr, eis_addr);
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
-    /* Save shadow buffer base addr for use during queue creation */
-    n->dbbuf_dbs = dbs_addr;
-    n->dbbuf_eis = eis_addr;
-    n->dbbuf_enabled = true;
-
-    for (i = 0; i < n->base.num_queues; i++) {
-        NvmeSQueue *sq = n->base.sq[i];
-        NvmeCQueue *cq = n->base.cq[i];
-
-        if (sq) {
-            /*
-             * CAP.DSTRD is 0, so offset of ith sq db_addr is (i<<3)
-             * nvme_process_db() uses this hard-coded way to calculate
-             * doorbell offsets. Be consistent with that here.
-             */
-            sq->db_addr = dbs_addr + (i << 3);
-            sq->ei_addr = eis_addr + (i << 3);
-            stl_le_pci_dma(pci, sq->db_addr, sq->tail, MEMTXATTRS_UNSPECIFIED);
-
-            if (sq->sqid != 0) {
-                nvme_sq_init_notifier(sq);
-            }
-        }
-
-        if (cq) {
-            /* CAP.DSTRD is 0, so offset of ith cq db_addr is (i<<3)+(1<<2) */
-            cq->db_addr = dbs_addr + (i << 3) + (1 << 2);
-            cq->ei_addr = eis_addr + (i << 3) + (1 << 2);
-            stl_le_pci_dma(pci, cq->db_addr, cq->head, MEMTXATTRS_UNSPECIFIED);
-
-            if (cq->cqid != 0) {
-                nvme_cq_init_notifier(cq);
-            }
-        }
-    }
-
-    trace_pci_nvme_dbbuf_config(dbs_addr, eis_addr);
-
-    return NVME_SUCCESS;
-}
-
 static uint16_t nvme_sec_prot_spdm_send(NvmeCtrl *n, NvmeRequest *req)
 {
     StorageSpdmTransportHeader hdr = {0};
@@ -7047,8 +6901,33 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
         return nvme_ns_attachment(n, req);
     case NVME_ADM_CMD_VIRT_MNGMT:
         return nvme_virt_mngmt(n, req);
-    case NVME_ADM_CMD_DBBUF_CONFIG:
-        return nvme_dbbuf_config(n, req);
+    case NVME_ADM_CMD_DBBUF_CONFIG: {
+        /*
+         * The command handling is common (nvme_dbbuf_config in core);
+         * additionally wire the doorbell notifiers for the already
+         * created io queues. Queues created after DBBUF_CONFIG (or on
+         * migration restore) get their wiring in nvme_sq_setup()/nvme_cq_setup().
+         */
+        uint16_t status = nvme_dbbuf_config(&n->base, req);
+        int i;
+
+        if (!status) {
+            for (i = 1; i < n->base.num_queues; i++) {
+                NvmeSQueue *sq = n->base.sq[i];
+                NvmeCQueue *cq = n->base.cq[i];
+
+                if (sq) {
+                    nvme_sq_init_notifier(sq);
+                }
+
+                if (cq) {
+                    nvme_cq_init_notifier(cq);
+                }
+            }
+        }
+
+        return status;
+    }
     case NVME_ADM_CMD_FORMAT_NVM:
         return nvme_format(n, req);
     case NVME_ADM_CMD_DIRECTIVE_SEND:
@@ -7064,29 +6943,6 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
     }
 
     return NVME_INVALID_OPCODE | NVME_DNR;
-}
-
-static void nvme_sq_set_eventidx(const NvmeSQueue *sq)
-{
-    trace_pci_nvme_sq_set_eventidx(sq->sqid, sq->tail);
-
-    stl_le_pci_dma(PCI_DEVICE(sq->ctrl), sq->ei_addr, sq->tail,
-                   MEMTXATTRS_UNSPECIFIED);
-}
-
-static bool nvme_sq_update_tail(NvmeSQueue *sq)
-{
-    uint32_t tail = sq->tail;
-
-    ldl_le_pci_dma(PCI_DEVICE(sq->ctrl), sq->db_addr, &sq->tail,
-                   MEMTXATTRS_UNSPECIFIED);
-
-    if (tail != sq->tail) {
-        trace_pci_nvme_sq_update_tail(sq->sqid, tail, sq->tail);
-        return true;
-    }
-
-    return false;
 }
 
 static int nvme_atomic_boundary_check(NvmeCtrl *n, NvmeCmd *cmd,
@@ -7401,9 +7257,9 @@ static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst)
     stl_le_p(&n->base.bar.intmc, 0);
     stl_le_p(&n->base.bar.cc, 0);
 
-    n->dbbuf_dbs = 0;
-    n->dbbuf_eis = 0;
-    n->dbbuf_enabled = false;
+    n->base.dbbuf_dbs = 0;
+    n->base.dbbuf_eis = 0;
+    n->base.dbbuf_enabled = false;
 }
 
 static void nvme_ctrl_shutdown(NvmeCtrl *n)
@@ -7896,7 +7752,7 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
         }
 
         cq->head = new_head;
-        if (!qid && n->dbbuf_enabled) {
+        if (!qid && n->base.dbbuf_enabled) {
             stl_le_pci_dma(pci, cq->db_addr, cq->head, MEMTXATTRS_UNSPECIFIED);
         }
 
@@ -7942,7 +7798,7 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
         trace_pci_nvme_mmio_doorbell_sq(sq->sqid, new_tail);
 
         sq->tail = new_tail;
-        if (!qid && n->dbbuf_enabled) {
+        if (!qid && n->base.dbbuf_enabled) {
             /*
              * The spec states "the host shall also update the controller's
              * corresponding doorbell property to match the value of that entry
@@ -9829,9 +9685,9 @@ static const VMStateDescription nvme_vmstate = {
 
         VMSTATE_UINT32(base.conf_msix_qsize, NvmeCtrl),
         VMSTATE_UINT32(base.conf_ioqpairs, NvmeCtrl),
-        VMSTATE_UINT64(dbbuf_dbs, NvmeCtrl),
-        VMSTATE_UINT64(dbbuf_eis, NvmeCtrl),
-        VMSTATE_BOOL(dbbuf_enabled, NvmeCtrl),
+        VMSTATE_UINT64(base.dbbuf_dbs, NvmeCtrl),
+        VMSTATE_UINT64(base.dbbuf_eis, NvmeCtrl),
+        VMSTATE_BOOL(base.dbbuf_enabled, NvmeCtrl),
 
         VMSTATE_UINT8(aer_mask, NvmeCtrl),
         VMSTATE_VARRAY_OF_POINTER_TO_STRUCT_UINT8_ALLOC(
