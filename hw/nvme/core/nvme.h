@@ -445,16 +445,33 @@ static inline bool nvme_addr_is_iomem(NvmeCtrlBase *n, hwaddr addr)
 }
 
 /*
- * CMB/PMR-aware address operations, implemented by the test device
- * (test/ctrl.c). The test device is the only device model using the
- * core at this point, so core/dptr.c calls these directly; dispatch
- * through a QOM base class arrives with the production device ("move
- * device dispatch hooks to a QOM base class").
+ * CMB/PMR-aware address operations and queue add-ons, implemented by
+ * the test device (test/ctrl.c). The test device is the only device
+ * model using the core at this point, so core/dptr.c and core/queue.c
+ * call these directly; dispatch through a QOM base class arrives with
+ * the production device ("move device dispatch hooks to a QOM base
+ * class").
+ *
+ * The queue add-ons, called from core/queue.c:
+ *
+ *  - nvme_cq_setup()/nvme_sq_setup() are called when a
+ *    queue is created or restored, before the queue is attached to
+ *    the controller; they wire up doorbell buffer shadow addresses
+ *    and ioeventfd on top of the common queue initialization.
+ *  - nvme_cq_teardown()/nvme_sq_teardown() tear the ioeventfd wiring
+ *    down when a queue is freed.
+ *  - nvme_process_sq() is the submission queue bottom half callback
+ *    (the submission queue command dispatch is not shared).
  */
 uint16_t nvme_map_addr(NvmeCtrlBase *n, NvmeSg *sg, hwaddr addr, size_t len);
 int nvme_addr_read(NvmeCtrlBase *n, hwaddr addr, void *buf, int size);
 int nvme_addr_write(NvmeCtrlBase *n, hwaddr addr, const void *buf, int size);
 bool nvme_is_dma_addr(NvmeCtrlBase *n, hwaddr addr);
+void nvme_cq_setup(struct NvmeCQueue *cq);
+void nvme_cq_teardown(struct NvmeCQueue *cq);
+void nvme_sq_setup(struct NvmeSQueue *sq);
+void nvme_sq_teardown(struct NvmeSQueue *sq);
+void nvme_process_sq(void *opaque);
 
 /*
  * Functions implemented in core/dptr.c and core/dma.c. Declared here so
@@ -475,11 +492,29 @@ void nvme_blk_write(BlockBackend *blk, int64_t offset, uint32_t align,
                     BlockCompletionFunc *cb, NvmeRequest *req);
 
 /*
- * Interrupt delivery implemented in core/irq.c. Declared here so
- * the device models can call it.
+ * Interrupt delivery implemented in core/irq.c; queue mechanics in
+ * core/queue.c. Declared here so the device models can call them.
  */
 void nvme_irq_check_intx(NvmeCtrlBase *n);
 void nvme_irq_msix(NvmeCtrlBase *n, int vector);
 void nvme_irq_msi(NvmeCtrlBase *n);
+
+void nvme_init_cq_common(NvmeCQueue *cq);
+void nvme_init_cq(NvmeCQueue *cq, NvmeCtrlBase *n, uint64_t dma_addr,
+                  uint16_t cqid, uint16_t vector, uint16_t size,
+                  uint16_t irq_enabled);
+void nvme_post_cqes(void *opaque);
+void nvme_enqueue_req_completion(NvmeCQueue *cq, NvmeRequest *req);
+void nvme_free_cq(NvmeCQueue *cq);
+uint16_t nvme_del_cq(NvmeCtrlBase *n, NvmeRequest *req);
+uint16_t nvme_create_cq(NvmeCtrlBase *n, NvmeRequest *req);
+
+void nvme_init_sq_common(NvmeSQueue *sq);
+void nvme_init_sq(NvmeSQueue *sq, NvmeCtrlBase *n, uint64_t dma_addr,
+                  uint16_t sqid, uint16_t cqid, uint16_t size);
+void nvme_sq_cancel_inflight(NvmeSQueue *sq, uint16_t status);
+void nvme_free_sq(NvmeSQueue *sq);
+uint16_t nvme_del_sq(NvmeCtrlBase *n, NvmeRequest *req);
+uint16_t nvme_create_sq(NvmeCtrlBase *n, NvmeRequest *req);
 
 #endif /* HW_NVME_NVME_H */

@@ -208,7 +208,6 @@
 #include "system/block-backend.h"
 #include "system/hostmem.h"
 #include "hw/pci/msix.h"
-#include "hw/pci/msi.h"
 #include "hw/pci/pcie_sriov.h"
 #include "system/spdm-socket.h"
 #include "migration/blocker.h"
@@ -316,7 +315,6 @@ static const uint32_t nvme_cse_iocs_zoned_default[256] = {
     [NVME_CMD_ZONE_MGMT_RECV]       = NVME_CMD_EFF_CSUPP,
 };
 
-static void nvme_process_sq(void *opaque);
 static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst);
 static inline uint64_t nvme_get_timestamp(const NvmeCtrl *n);
 
@@ -748,11 +746,6 @@ static inline bool nvme_msix_enabled(NvmeCtrl *n)
 {
     return msix_enabled(PCI_DEVICE(n));
 }
-
-static inline bool nvme_msi_enabled(NvmeCtrl *n)
-{
-    return msi_enabled(PCI_DEVICE(n));
-}
 /*
  * The host advanced the CQ head (via a real doorbell write or through
  * the shadow doorbell buffer ioeventfd): process the new head, i.e.
@@ -1039,94 +1032,42 @@ static bool nvme_cq_update_head(NvmeCQueue *cq)
     return false;
 }
 
-static void nvme_post_cqes(void *opaque)
+/*
+ * Test device CQ teardown, called directly from core/queue.c: the
+ * ioeventfd wiring for this CQ (registered in nvme_cq_setup())
+ * lives on the test device doorbell region and must be torn down when
+ * the queue is freed.
+ */
+void nvme_cq_teardown(NvmeCQueue *cq)
 {
-    NvmeCQueue *cq = opaque;
     NvmeCtrl *n = nvme_ctrl_from_cq(cq);
-    NvmeRequest *req, *next;
-    bool pending = cq->head != cq->tail;
-    int ret;
+    uint16_t offset = (cq->cqid << 3) + (1 << 2);
 
-    QTAILQ_FOREACH_SAFE(req, &cq->req_list, entry, next) {
-        NvmeSQueue *sq;
-        hwaddr addr;
-
-        if (nvme_cq_full(cq)) {
-            break;
-        }
-
-        /*
-         * Here we take the following fields from NvmeRequest structure
-         * and write cqe to the guest RAM based on them:
-         * - req->sq
-         * - req->status
-         * - req->cqe
-         *
-         * If you change this code and more fields from NvmeRequest are
-         * used, please make sure that you have handled this in:
-         * nvme_vmstate_request and nvme_ctrl_pre_save().
-         */
-
-        sq = req->sq;
-        req->cqe.status = cpu_to_le16((req->status << 1) | cq->phase);
-        req->cqe.sq_head = cpu_to_le16(sq->head);
-        addr = cq->dma_addr + (cq->tail << NVME_CQES);
-        ret = pci_dma_write(PCI_DEVICE(n), addr, (void *)&req->cqe,
-                            sizeof(req->cqe));
-        if (ret) {
-            trace_pci_nvme_err_addr_write(addr);
-            trace_pci_nvme_err_cfs();
-            stl_le_p(&n->base.bar.csts, NVME_CSTS_FAILED);
-            break;
-        }
-
-        QTAILQ_REMOVE(&cq->req_list, req, entry);
-
-        nvme_inc_cq_tail(cq);
-
-        if (QTAILQ_EMPTY(&sq->req_list) && !nvme_sq_empty(sq)) {
-            qemu_bh_schedule(sq->bh);
-        }
-
-        QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
-    }
-
-    if (cq->vector < 0) {
-        return;
-    }
-
-    if (cq->tail != cq->head) {
-        if (nvme_msix_enabled(n)) {
-            nvme_irq_msix(&n->base, cq->vector);
-        } else if (nvme_msi_enabled(n)) {
-            nvme_irq_msi(&n->base);
-        } else if (!pending) {
-            n->base.irq.intx.pending++;
-
-            nvme_irq_check_intx(&n->base);
-        }
+    if (cq->cqid && cq->notifier.initialized) {
+        memory_region_del_eventfd(&n->iomem,
+                                  0x1000 + offset, 4, false, 0, &cq->notifier);
+        event_notifier_set_handler(&cq->notifier, NULL);
+        event_notifier_cleanup(&cq->notifier);
     }
 }
 
-static void nvme_enqueue_req_completion(NvmeCQueue *cq, NvmeRequest *req)
+/*
+ * Test device SQ teardown, called directly from core/queue.c: the
+ * ioeventfd wiring for this SQ (registered in nvme_sq_setup())
+ * lives on the test device doorbell region and must be torn down when
+ * the queue is freed.
+ */
+void nvme_sq_teardown(NvmeSQueue *sq)
 {
-    assert(cq->cqid == req->sq->cqid);
-    trace_pci_nvme_enqueue_req_completion(nvme_cid(req), cq->cqid,
-                                          le32_to_cpu(req->cqe.result),
-                                          le32_to_cpu(req->cqe.dw1),
-                                          req->status);
+    NvmeCtrl *n = nvme_ctrl_from_sq(sq);
+    uint16_t offset = sq->sqid << 3;
 
-    if (req->status) {
-        trace_pci_nvme_err_req_status(nvme_cid(req), nvme_nsid(req->ns),
-                                      req->status, req->cmd.opcode);
+    if (sq->sqid && sq->notifier.initialized) {
+        memory_region_del_eventfd(&n->iomem,
+                                  0x1000 + offset, 4, false, 0, &sq->notifier);
+        event_notifier_set_handler(&sq->notifier, NULL);
+        event_notifier_cleanup(&sq->notifier);
     }
-
-    nvme_sg_unmap(&req->sg);
-
-    QTAILQ_REMOVE(&req->sq->out_req_list, req, entry);
-    QTAILQ_INSERT_TAIL(&cq->req_list, req, entry);
-
-    qemu_bh_schedule(cq->bh);
 }
 
 static void nvme_process_aers(void *opaque)
@@ -4421,123 +4362,23 @@ static void nvme_sq_init_notifier(NvmeSQueue *sq)
 }
 
 /*
- * A pending Async Event Request has no aiocb (nvme_aer() parks it without
- * issuing any block I/O), so there is nothing to cancel; just drop it.
+ * Test device SQ setup, called directly from core/queue.c: dbbuf shadow
+ * wiring and ioeventfd registration before the common setup.
  */
-static void nvme_sq_cancel_inflight(NvmeSQueue *sq, uint16_t status)
-{
-    NvmeRequest *r;
-
-    while (!QTAILQ_EMPTY(&sq->out_req_list)) {
-        r = QTAILQ_FIRST(&sq->out_req_list);
-        r->status = status;
-
-        if (r->aiocb) {
-            blk_aio_cancel(r->aiocb);
-        } else {
-            QTAILQ_REMOVE(&sq->out_req_list, r, entry);
-        }
-    }
-}
-
-static void nvme_free_sq(NvmeSQueue *sq, NvmeCtrl *n)
-{
-    uint16_t offset = sq->sqid << 3;
-
-    n->base.sq[sq->sqid] = NULL;
-    qemu_bh_delete(sq->bh);
-    if (sq->sqid && sq->notifier.initialized) {
-        memory_region_del_eventfd(&n->iomem,
-                                  0x1000 + offset, 4, false, 0, &sq->notifier);
-        event_notifier_set_handler(&sq->notifier, NULL);
-        event_notifier_cleanup(&sq->notifier);
-    }
-    g_free(sq->io_req);
-    if (sq->sqid) {
-        g_free(sq);
-    }
-}
-
-static uint16_t nvme_del_sq(NvmeCtrl *n, NvmeRequest *req)
-{
-    NvmeDeleteQ *c = (NvmeDeleteQ *)&req->cmd;
-    NvmeRequest *r, *next;
-    NvmeSQueue *sq;
-    NvmeCQueue *cq;
-    uint16_t qid = le16_to_cpu(c->qid);
-
-    if (unlikely(!qid || nvme_check_sqid(&n->base, qid))) {
-        trace_pci_nvme_err_invalid_del_sq(qid);
-        return NVME_INVALID_QID | NVME_DNR;
-    }
-
-    trace_pci_nvme_del_sq(qid);
-
-    sq = n->base.sq[qid];
-    nvme_sq_cancel_inflight(sq, NVME_CMD_ABORT_SQ_DEL);
-
-    if (!nvme_check_cqid(&n->base, sq->cqid)) {
-        cq = n->base.cq[sq->cqid];
-        QTAILQ_REMOVE(&cq->sq_list, sq, entry);
-
-        nvme_post_cqes(cq);
-        QTAILQ_FOREACH_SAFE(r, &cq->req_list, entry, next) {
-            if (r->sq == sq) {
-                QTAILQ_REMOVE(&cq->req_list, r, entry);
-                QTAILQ_INSERT_TAIL(&sq->req_list, r, entry);
-            }
-        }
-    }
-
-    nvme_free_sq(sq, n);
-    return NVME_SUCCESS;
-}
-
-static void __nvme_init_sq(NvmeSQueue *sq)
+void nvme_sq_setup(NvmeSQueue *sq)
 {
     NvmeCtrl *n = nvme_ctrl_from_sq(sq);
-    uint16_t sqid = sq->sqid;
-    uint16_t cqid = sq->cqid;
-    int i;
-    NvmeCQueue *cq;
-
-    sq->io_req = g_new0(NvmeRequest, sq->size);
-
-    QTAILQ_INIT(&sq->req_list);
-    QTAILQ_INIT(&sq->out_req_list);
-    for (i = 0; i < sq->size; i++) {
-        sq->io_req[i].sq = sq;
-        QTAILQ_INSERT_TAIL(&(sq->req_list), &sq->io_req[i], entry);
-    }
-
-    sq->bh = qemu_bh_new_guarded(nvme_process_sq, sq,
-                                 &DEVICE(sq->ctrl)->mem_reentrancy_guard);
 
     if (n->dbbuf_enabled) {
-        sq->db_addr = n->dbbuf_dbs + (sqid << 3);
-        sq->ei_addr = n->dbbuf_eis + (sqid << 3);
+        sq->db_addr = n->dbbuf_dbs + (sq->sqid << 3);
+        sq->ei_addr = n->dbbuf_eis + (sq->sqid << 3);
 
         if (sq->sqid != 0) {
             nvme_sq_init_notifier(sq);
         }
     }
 
-    assert(n->base.cq[cqid]);
-    cq = n->base.cq[cqid];
-    QTAILQ_INSERT_TAIL(&(cq->sq_list), sq, entry);
-    n->base.sq[sqid] = sq;
-}
-
-static void nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
-                         uint16_t sqid, uint16_t cqid, uint16_t size)
-{
-    sq->ctrl = &n->base;
-    sq->dma_addr = dma_addr;
-    sq->sqid = sqid;
-    sq->size = size;
-    sq->cqid = cqid;
-    sq->head = sq->tail = 0;
-    __nvme_init_sq(sq);
+    nvme_init_sq_common(sq);
 }
 
 static void nvme_restore_sq(NvmeSQueue *sq_from)
@@ -4556,55 +4397,7 @@ static void nvme_restore_sq(NvmeSQueue *sq_from)
         sq->tail = sq_from->tail;
     }
 
-    __nvme_init_sq(sq);
-}
-
-static uint16_t nvme_create_sq(NvmeCtrl *n, NvmeRequest *req)
-{
-    NvmeSQueue *sq;
-    NvmeCreateSq *c = (NvmeCreateSq *)&req->cmd;
-
-    uint16_t cqid = le16_to_cpu(c->cqid);
-    uint16_t sqid = le16_to_cpu(c->sqid);
-    uint16_t qsize = le16_to_cpu(c->qsize);
-    uint16_t qflags = le16_to_cpu(c->sq_flags);
-    uint64_t prp1 = le64_to_cpu(c->prp1);
-
-    trace_pci_nvme_create_sq(prp1, sqid, cqid, qsize, qflags);
-
-    if (unlikely(!cqid || nvme_check_cqid(&n->base, cqid))) {
-        trace_pci_nvme_err_invalid_create_sq_cqid(cqid);
-        return NVME_INVALID_CQID | NVME_DNR;
-    }
-    if (unlikely(!sqid || sqid > n->base.conf_ioqpairs || n->base.sq[sqid] != NULL)) {
-        trace_pci_nvme_err_invalid_create_sq_sqid(sqid);
-        return NVME_INVALID_QID | NVME_DNR;
-    }
-    if (unlikely(!qsize || qsize > NVME_CAP_MQES(ldq_le_p(&n->base.bar.cap)))) {
-        trace_pci_nvme_err_invalid_create_sq_size(qsize);
-        return NVME_MAX_QSIZE_EXCEEDED | NVME_DNR;
-    }
-    if (unlikely(prp1 & (n->base.page_size - 1))) {
-        trace_pci_nvme_err_invalid_create_sq_addr(prp1);
-        return NVME_INVALID_PRP_OFFSET | NVME_DNR;
-    }
-    if (unlikely(nvme_addr_is_iomem(&n->base, prp1))) {
-        /*
-         * Placing a queue in the controller's own MMIO would wedge the
-         * controller in CSTS.FAILED at the first command fetch (the
-         * re-entrancy guard blocks the access) instead of failing the
-         * creation here.
-         */
-        trace_pci_nvme_err_invalid_create_sq_addr(prp1);
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-    if (unlikely(!(NVME_SQ_FLAGS_PC(qflags)))) {
-        trace_pci_nvme_err_invalid_create_sq_qflags(NVME_SQ_FLAGS_PC(qflags));
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-    sq = g_malloc0(sizeof(*sq));
-    nvme_init_sq(sq, n, prp1, sqid, cqid, qsize + 1);
-    return NVME_SUCCESS;
+    nvme_sq_setup(sq);
 }
 
 struct nvme_stats {
@@ -5181,66 +4974,15 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeRequest *req)
     }
 }
 
-static void nvme_free_cq(NvmeCQueue *cq, NvmeCtrl *n)
-{
-    PCIDevice *pci = PCI_DEVICE(n);
-    uint16_t offset = (cq->cqid << 3) + (1 << 2);
-
-    n->base.cq[cq->cqid] = NULL;
-    qemu_bh_delete(cq->bh);
-    if (cq->cqid && cq->notifier.initialized) {
-        memory_region_del_eventfd(&n->iomem,
-                                  0x1000 + offset, 4, false, 0, &cq->notifier);
-        event_notifier_set_handler(&cq->notifier, NULL);
-        event_notifier_cleanup(&cq->notifier);
-    }
-    if (msix_present(pci) && cq->vector != -1) {
-        msix_vector_unuse(pci, cq->vector);
-    }
-    if (cq->cqid) {
-        g_free(cq);
-    }
-}
-
-static uint16_t nvme_del_cq(NvmeCtrl *n, NvmeRequest *req)
-{
-    NvmeDeleteQ *c = (NvmeDeleteQ *)&req->cmd;
-    NvmeCQueue *cq;
-    uint16_t qid = le16_to_cpu(c->qid);
-
-    if (unlikely(!qid || nvme_check_cqid(&n->base, qid))) {
-        trace_pci_nvme_err_invalid_del_cq_cqid(qid);
-        return NVME_INVALID_CQID | NVME_DNR;
-    }
-
-    cq = n->base.cq[qid];
-    if (unlikely(!QTAILQ_EMPTY(&cq->sq_list))) {
-        trace_pci_nvme_err_invalid_del_cq_notempty(qid);
-        return NVME_INVALID_QUEUE_DEL;
-    }
-
-    if (!nvme_cq_empty(cq) && cq->vector != -1 && !nvme_msix_enabled(n)) {
-        n->base.irq.intx.pending--;
-
-        nvme_irq_check_intx(&n->base);
-    }
-
-    trace_pci_nvme_del_cq(qid);
-    nvme_free_cq(cq, n);
-    return NVME_SUCCESS;
-}
-
-static void __nvme_init_cq(NvmeCQueue *cq)
+/*
+ * Test device CQ setup, called directly from core/queue.c: dbbuf shadow
+ * wiring and ioeventfd registration before the common setup.
+ */
+void nvme_cq_setup(NvmeCQueue *cq)
 {
     NvmeCtrl *n = nvme_ctrl_from_cq(cq);
-    PCIDevice *pci = PCI_DEVICE(n);
     uint16_t cqid = cq->cqid;
 
-    if (msix_present(pci) && cq->vector != -1) {
-        msix_vector_use(pci, cq->vector);
-    }
-
-    QTAILQ_INIT(&cq->sq_list);
     if (n->dbbuf_enabled) {
         cq->db_addr = n->dbbuf_dbs + (cqid << 3) + (1 << 2);
         cq->ei_addr = n->dbbuf_eis + (cqid << 3) + (1 << 2);
@@ -5249,24 +4991,8 @@ static void __nvme_init_cq(NvmeCQueue *cq)
             nvme_cq_init_notifier(cq);
         }
     }
-    n->base.cq[cqid] = cq;
-    cq->bh = qemu_bh_new_guarded(nvme_post_cqes, cq,
-                                 &DEVICE(cq->ctrl)->mem_reentrancy_guard);
-}
 
-static void nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
-                         uint16_t cqid, uint16_t vector, uint16_t size,
-                         uint16_t irq_enabled)
-{
-    cq->ctrl = &n->base;
-    cq->cqid = cqid;
-    cq->size = size;
-    cq->dma_addr = dma_addr;
-    cq->phase = 1;
-    cq->vector = irq_enabled ? vector : -1;
-    cq->head = cq->tail = 0;
-    QTAILQ_INIT(&cq->req_list);
-    __nvme_init_cq(cq);
+    nvme_init_cq_common(cq);
 }
 
 static void move_cq_req_list(NvmeCQueue *cq_to, NvmeCQueue *cq_from)
@@ -5298,76 +5024,7 @@ static void nvme_restore_cq(NvmeCQueue *cq_from)
         move_cq_req_list(cq, cq_from);
     }
 
-    __nvme_init_cq(cq);
-}
-
-static uint16_t nvme_create_cq(NvmeCtrl *n, NvmeRequest *req)
-{
-    NvmeCQueue *cq;
-    NvmeCreateCq *c = (NvmeCreateCq *)&req->cmd;
-    uint16_t cqid = le16_to_cpu(c->cqid);
-    uint16_t vector = le16_to_cpu(c->irq_vector);
-    uint16_t qsize = le16_to_cpu(c->qsize);
-    uint16_t qflags = le16_to_cpu(c->cq_flags);
-    uint64_t prp1 = le64_to_cpu(c->prp1);
-    uint32_t cc = ldq_le_p(&n->base.bar.cc);
-    uint8_t iocqes = NVME_CC_IOCQES(cc);
-    uint8_t iosqes = NVME_CC_IOSQES(cc);
-
-    trace_pci_nvme_create_cq(prp1, cqid, vector, qsize, qflags,
-                             NVME_CQ_FLAGS_IEN(qflags) != 0);
-
-    if (iosqes != NVME_SQES || iocqes != NVME_CQES) {
-        trace_pci_nvme_err_invalid_create_cq_entry_size(iosqes, iocqes);
-        return NVME_MAX_QSIZE_EXCEEDED | NVME_DNR;
-    }
-
-    if (unlikely(!cqid || cqid > n->base.conf_ioqpairs || n->base.cq[cqid] != NULL)) {
-        trace_pci_nvme_err_invalid_create_cq_cqid(cqid);
-        return NVME_INVALID_QID | NVME_DNR;
-    }
-    if (unlikely(!qsize || qsize > NVME_CAP_MQES(ldq_le_p(&n->base.bar.cap)))) {
-        trace_pci_nvme_err_invalid_create_cq_size(qsize);
-        return NVME_MAX_QSIZE_EXCEEDED | NVME_DNR;
-    }
-    if (unlikely(prp1 & (n->base.page_size - 1))) {
-        trace_pci_nvme_err_invalid_create_cq_addr(prp1);
-        return NVME_INVALID_PRP_OFFSET | NVME_DNR;
-    }
-    if (unlikely(nvme_addr_is_iomem(&n->base, prp1))) {
-        /*
-         * Placing a queue in the controller's own MMIO would wedge the
-         * controller in CSTS.FAILED at the first completion posting
-         * (the re-entrancy guard blocks the access) instead of failing
-         * the creation here.
-         */
-        trace_pci_nvme_err_invalid_create_cq_addr(prp1);
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-    if (unlikely(!msix_enabled(PCI_DEVICE(n)) && vector)) {
-        trace_pci_nvme_err_invalid_create_cq_vector(vector);
-        return NVME_INVALID_IRQ_VECTOR | NVME_DNR;
-    }
-    if (unlikely(vector >= n->base.conf_msix_qsize)) {
-        trace_pci_nvme_err_invalid_create_cq_vector(vector);
-        return NVME_INVALID_IRQ_VECTOR | NVME_DNR;
-    }
-    if (unlikely(!(NVME_CQ_FLAGS_PC(qflags)))) {
-        trace_pci_nvme_err_invalid_create_cq_qflags(NVME_CQ_FLAGS_PC(qflags));
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
-    cq = g_malloc0(sizeof(*cq));
-    nvme_init_cq(cq, n, prp1, cqid, vector, qsize + 1,
-                 NVME_CQ_FLAGS_IEN(qflags));
-
-    /*
-     * It is only required to set qs_created when creating a completion queue;
-     * creating a submission queue without a matching completion queue will
-     * fail.
-     */
-    n->base.qs_created = true;
-    return NVME_SUCCESS;
+    nvme_cq_setup(cq);
 }
 
 static uint16_t nvme_rpt_empty_id_struct(NvmeCtrl *n, NvmeRequest *req)
@@ -7367,15 +7024,15 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
 
     switch (req->cmd.opcode) {
     case NVME_ADM_CMD_DELETE_SQ:
-        return nvme_del_sq(n, req);
+        return nvme_del_sq(&n->base, req);
     case NVME_ADM_CMD_CREATE_SQ:
-        return nvme_create_sq(n, req);
+        return nvme_create_sq(&n->base, req);
     case NVME_ADM_CMD_GET_LOG_PAGE:
         return nvme_get_log(n, req);
     case NVME_ADM_CMD_DELETE_CQ:
-        return nvme_del_cq(n, req);
+        return nvme_del_cq(&n->base, req);
     case NVME_ADM_CMD_CREATE_CQ:
-        return nvme_create_cq(n, req);
+        return nvme_create_cq(&n->base, req);
     case NVME_ADM_CMD_IDENTIFY:
         return nvme_identify(n, req);
     case NVME_ADM_CMD_ABORT:
@@ -7556,7 +7213,7 @@ static NvmeAtomic *nvme_get_atomic(NvmeCtrl *n, NvmeCmd *cmd)
     return NULL;
 }
 
-static void nvme_process_sq(void *opaque)
+void nvme_process_sq(void *opaque)
 {
     NvmeSQueue *sq = opaque;
     NvmeCtrl *n = nvme_ctrl_from_sq(sq);
@@ -7695,12 +7352,12 @@ static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst)
 
     for (i = 0; i < n->base.num_queues; i++) {
         if (n->base.sq[i] != NULL) {
-            nvme_free_sq(n->base.sq[i], n);
+            nvme_free_sq(n->base.sq[i]);
         }
     }
     for (i = 0; i < n->base.num_queues; i++) {
         if (n->base.cq[i] != NULL) {
-            nvme_free_cq(n->base.cq[i], n);
+            nvme_free_cq(n->base.cq[i]);
         }
     }
 
@@ -7829,8 +7486,8 @@ static int nvme_start_ctrl(NvmeCtrl *n)
     n->base.page_bits = page_bits;
     n->base.page_size = page_size;
     n->base.max_prp_ents = n->base.page_size / sizeof(uint64_t);
-    nvme_init_cq(&n->base.admin_cq, n, acq, 0, 0, NVME_AQA_ACQS(aqa) + 1, 1);
-    nvme_init_sq(&n->base.admin_sq, n, asq, 0, 0, NVME_AQA_ASQS(aqa) + 1);
+    nvme_init_cq(&n->base.admin_cq, &n->base, acq, 0, 0, NVME_AQA_ACQS(aqa) + 1, 1);
+    nvme_init_sq(&n->base.admin_sq, &n->base, asq, 0, 0, NVME_AQA_ASQS(aqa) + 1);
 
     nvme_set_timestamp(n, 0ULL);
 
