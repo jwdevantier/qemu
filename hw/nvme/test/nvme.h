@@ -245,12 +245,6 @@ typedef struct NvmeParams {
     uint8_t  zasl;
     bool     auto_transition_zones;
     bool     legacy_cmb;
-    /*
-     * Deprecated: the io queue doorbell ioeventfd wiring is always
-     * attempted when a doorbell buffer is configured. Kept for
-     * command line compatibility; ignored.
-     */
-    bool     ioeventfd;
     bool     dbcs;
     uint16_t  sriov_max_vfs;
     uint16_t sriov_vq_flexible;

@@ -709,30 +709,6 @@ static inline bool nvme_msix_enabled(NvmeCtrl *n)
 {
     return msix_enabled(PCI_DEVICE(n));
 }
-/*
- * The host advanced the CQ head (via a real doorbell write or through
- * the shadow doorbell buffer ioeventfd): process the new head, i.e.
- * account for the consumed completions and re-evaluate the irq state
- * if the queue was drained, and schedule deferred completion posting.
- */
-static void nvme_cq_kick(NvmeCQueue *cq)
-{
-    NvmeCtrl *n = nvme_ctrl_from_cq(cq);
-
-    if (!QTAILQ_EMPTY(&cq->req_list)) {
-        qemu_bh_schedule(cq->bh);
-    }
-
-    if (nvme_cq_empty(cq) && cq->vector != -1 && !nvme_msix_enabled(n)) {
-        /*
-         * nvme_cq_kick is only called when the head changes so it is safe to
-         * decrement intx.pending unconditionally.
-         */
-        n->base.irq.intx.pending--;
-
-        nvme_irq_check_intx(&n->base);
-    }
-}
 
 /*
  * When metadata is transferred as extended LBAs, the DPTR mapped into `sg`
@@ -972,43 +948,6 @@ uint16_t nvme_bounce_mdata(NvmeCtrlBase *n, void *ptr, uint32_t len,
     return nvme_tx(n, &req->sg, ptr, len, dir);
 }
 
-/*
- * Test device CQ teardown, called directly from core/queue.c: the
- * ioeventfd wiring for this CQ (registered in nvme_cq_setup())
- * lives on the test device doorbell region and must be torn down when
- * the queue is freed.
- */
-void nvme_cq_teardown(NvmeCQueue *cq)
-{
-    NvmeCtrl *n = nvme_ctrl_from_cq(cq);
-    uint16_t offset = (cq->cqid << 3) + (1 << 2);
-
-    if (cq->cqid && cq->notifier.initialized) {
-        memory_region_del_eventfd(&n->iomem,
-                                  0x1000 + offset, 4, false, 0, &cq->notifier);
-        event_notifier_set_handler(&cq->notifier, NULL);
-        event_notifier_cleanup(&cq->notifier);
-    }
-}
-
-/*
- * Test device SQ teardown, called directly from core/queue.c: the
- * ioeventfd wiring for this SQ (registered in nvme_sq_setup())
- * lives on the test device doorbell region and must be torn down when
- * the queue is freed.
- */
-void nvme_sq_teardown(NvmeSQueue *sq)
-{
-    NvmeCtrl *n = nvme_ctrl_from_sq(sq);
-    uint16_t offset = sq->sqid << 3;
-
-    if (sq->sqid && sq->notifier.initialized) {
-        memory_region_del_eventfd(&n->iomem,
-                                  0x1000 + offset, 4, false, 0, &sq->notifier);
-        event_notifier_set_handler(&sq->notifier, NULL);
-        event_notifier_cleanup(&sq->notifier);
-    }
-}
 
 static void nvme_process_aers(void *opaque)
 {
@@ -4188,130 +4127,6 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeRequest *req)
     g_assert_not_reached();
 }
 
-/*
- * Shadow doorbell buffer ioeventfd wiring: when a doorbell buffer is
- * configured, an event notifier is registered on the queue's doorbell
- * offset of the MMIO region so doorbell writes can be dispatched by
- * the accelerator without trapping. The authoritative queue indices
- * are then taken from the shadow buffers.
- */
-static void nvme_cq_notifier(EventNotifier *e)
-{
-    NvmeCQueue *cq = container_of(e, NvmeCQueue, notifier);
-
-    trace_pci_nvme_cq_notifier(cq->cqid);
-
-    if (!event_notifier_test_and_clear(e)) {
-        return;
-    }
-
-    while (nvme_cq_update_head(cq)) {
-cq_kick:
-        nvme_cq_kick(cq);
-    }
-
-    nvme_cq_set_eventidx(cq);
-
-    /*
-     * The driver may have written the cq head after we last checked it, but
-     * before we wrote the eventidx, causing the driver to skip mmio, so check
-     * the head just one more time.
-     */
-    if (nvme_cq_update_head(cq)) {
-        trace_pci_nvme_cq_notifier_race(cq->cqid);
-        goto cq_kick;
-    }
-}
-
-static void nvme_cq_init_notifier(NvmeCQueue *cq)
-{
-    NvmeCtrl *n = nvme_ctrl_from_cq(cq);
-    uint16_t offset = (cq->cqid << 3) + (1 << 2);
-
-    if (event_notifier_init(&cq->notifier, 0)) {
-        return;
-    }
-
-    event_notifier_set_handler(&cq->notifier, nvme_cq_notifier);
-    memory_region_add_eventfd(&n->iomem,
-                              0x1000 + offset, 4, false, 0, &cq->notifier);
-}
-
-static void nvme_sq_notifier(EventNotifier *e)
-{
-    NvmeSQueue *sq = container_of(e, NvmeSQueue, notifier);
-
-    trace_pci_nvme_sq_notifier(sq->sqid);
-
-    if (!event_notifier_test_and_clear(e)) {
-        return;
-    }
-
-    while (nvme_sq_update_tail(sq)) {
-process_sq:
-        nvme_process_sq(sq);
-    }
-
-    nvme_sq_set_eventidx(sq);
-
-    /*
-     * The driver may have written the sq tail after we last checked it, but
-     * before we wrote the eventidx, causing the driver to skip mmio, so check
-     * the tail just one more time.
-     *
-     *      HOST                    DEVICE
-     *      -------------------------------------------------
-     *      (post sqe at 0)
-     *      sq_tail <- 1
-     *      eventidx -> 0
-     *      (do mmio)
-     *                              (wake up)
-     *                              sq_tail -> 1
-     *                              (process sqe at 0)
-     *                              sq_tail -> 1
-     *      (post sqe at 1)
-     *      sq_tail <- 2
-     *      eventidx -> 0
-     *      (skip mmio)
-     *                              eventidx <- 1
-     *                              (sleep, lost sqe at 1)
-     */
-
-    if (nvme_sq_update_tail(sq)) {
-        trace_pci_nvme_sq_notifier_race(sq->sqid);
-        goto process_sq;
-    }
-}
-
-static void nvme_sq_init_notifier(NvmeSQueue *sq)
-{
-    NvmeCtrl *n = nvme_ctrl_from_sq(sq);
-    uint16_t offset = sq->sqid << 3;
-
-    if (event_notifier_init(&sq->notifier, 0)) {
-        return;
-    }
-
-    event_notifier_set_handler(&sq->notifier, nvme_sq_notifier);
-    memory_region_add_eventfd(&n->iomem,
-                              0x1000 + offset, 4, false, 0, &sq->notifier);
-}
-
-/*
- * Test device SQ setup, called directly from core/queue.c: ioeventfd
- * registration (test device only) before the common setup.
- */
-void nvme_sq_setup(NvmeSQueue *sq)
-{
-    NvmeCtrl *n = nvme_ctrl_from_sq(sq);
-
-    if (n->base.dbbuf_enabled && sq->sqid != 0) {
-        nvme_sq_init_notifier(sq);
-    }
-
-    nvme_init_sq_common(sq);
-}
-
 static void nvme_restore_sq(NvmeSQueue *sq_from)
 {
     NvmeCtrl *n = nvme_ctrl_from_sq(sq_from);
@@ -4328,9 +4143,8 @@ static void nvme_restore_sq(NvmeSQueue *sq_from)
         sq->tail = sq_from->tail;
     }
 
-    nvme_sq_setup(sq);
+    nvme_init_sq_common(sq);
 }
-
 struct nvme_stats {
     uint64_t units_read;
     uint64_t units_written;
@@ -4905,20 +4719,6 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeRequest *req)
     }
 }
 
-/*
- * Test device CQ setup, called directly from core/queue.c: ioeventfd
- * registration (test device only) before the common setup.
- */
-void nvme_cq_setup(NvmeCQueue *cq)
-{
-    NvmeCtrl *n = nvme_ctrl_from_cq(cq);
-
-    if (n->base.dbbuf_enabled && cq->cqid != 0) {
-        nvme_cq_init_notifier(cq);
-    }
-
-    nvme_init_cq_common(cq);
-}
 
 static void move_cq_req_list(NvmeCQueue *cq_to, NvmeCQueue *cq_from)
 {
@@ -4949,9 +4749,8 @@ static void nvme_restore_cq(NvmeCQueue *cq_from)
         move_cq_req_list(cq, cq_from);
     }
 
-    nvme_cq_setup(cq);
+    nvme_init_cq_common(cq);
 }
-
 static uint16_t nvme_rpt_empty_id_struct(NvmeCtrl *n, NvmeRequest *req)
 {
     uint8_t id[NVME_IDENTIFY_DATA_SIZE] = {};
@@ -6901,33 +6700,8 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
         return nvme_ns_attachment(n, req);
     case NVME_ADM_CMD_VIRT_MNGMT:
         return nvme_virt_mngmt(n, req);
-    case NVME_ADM_CMD_DBBUF_CONFIG: {
-        /*
-         * The command handling is common (nvme_dbbuf_config in core);
-         * additionally wire the doorbell notifiers for the already
-         * created io queues. Queues created after DBBUF_CONFIG (or on
-         * migration restore) get their wiring in nvme_sq_setup()/nvme_cq_setup().
-         */
-        uint16_t status = nvme_dbbuf_config(&n->base, req);
-        int i;
-
-        if (!status) {
-            for (i = 1; i < n->base.num_queues; i++) {
-                NvmeSQueue *sq = n->base.sq[i];
-                NvmeCQueue *cq = n->base.cq[i];
-
-                if (sq) {
-                    nvme_sq_init_notifier(sq);
-                }
-
-                if (cq) {
-                    nvme_cq_init_notifier(cq);
-                }
-            }
-        }
-
-        return status;
-    }
+    case NVME_ADM_CMD_DBBUF_CONFIG:
+        return nvme_dbbuf_config(&n->base, req);
     case NVME_ADM_CMD_FORMAT_NVM:
         return nvme_format(n, req);
     case NVME_ADM_CMD_DIRECTIVE_SEND:
@@ -8047,6 +7821,9 @@ static void nvme_init_state(NvmeCtrl *n)
     uint8_t max_vfs;
     int i;
 
+    /* the doorbell MMIO region (ioeventfd target), see core/queue.c */
+    n->base.db_region = &n->iomem;
+
     if (pci_is_vf(pci)) {
         sctrl = nvme_sctrl(n);
         max_vfs = 0;
@@ -8920,7 +8697,7 @@ static const Property nvme_props[] = {
     DEFINE_PROP_UINT8("vsl", NvmeCtrl, params.vsl, 7),
     DEFINE_PROP_BOOL("use-intel-id", NvmeCtrl, params.use_intel_id, false),
     DEFINE_PROP_BOOL("legacy-cmb", NvmeCtrl, params.legacy_cmb, false),
-    DEFINE_PROP_BOOL("ioeventfd", NvmeCtrl, params.ioeventfd, false),
+    DEFINE_PROP_BOOL("ioeventfd", NvmeCtrl, base.params.ioeventfd, false),
     DEFINE_PROP_BOOL("dbcs", NvmeCtrl, params.dbcs, true),
     DEFINE_PROP_UINT8("zoned.zasl", NvmeCtrl, params.zasl, 0),
     DEFINE_PROP_BOOL("zoned.auto_transition", NvmeCtrl,

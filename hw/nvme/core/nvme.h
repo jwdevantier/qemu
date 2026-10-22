@@ -34,6 +34,7 @@
  */
 #define NVME_SQES 6
 #define NVME_CQES 4
+#define NVME_MAX_DB         0x1000
 
 QEMU_BUILD_BUG_ON(NVME_MAX_NAMESPACES > NVME_NSID_BROADCAST - 1);
 
@@ -241,6 +242,13 @@ typedef struct NvmeParamsBase {
     uint32_t max_ioqpairs;
     uint8_t  mdts;
     uint8_t  aerl;
+
+    /*
+     * Deprecated: the io queue doorbell ioeventfd wiring (see
+     * core/queue.c) is always attempted when a doorbell buffer is
+     * configured. Kept for command line compatibility; ignored.
+     */
+    bool     ioeventfd;
 } NvmeParamsBase;
 
 typedef struct NvmeCtrlBase {
@@ -298,6 +306,14 @@ typedef struct NvmeCtrlBase {
     uint64_t    dbbuf_dbs;
     uint64_t    dbbuf_eis;
     bool        dbbuf_enabled;
+
+    /*
+     * MMIO leaf region that carries the doorbell area: the test device
+     * registers its own "nvme" subregion on the BAR0 container. The
+     * dbbuf ioeventfd wiring (see core/queue.c) attaches its event
+     * notifiers to this region.
+     */
+    MemoryRegion *db_region;
 
     /* Migration-related stuff */
     Error *migration_blocker;
@@ -454,33 +470,21 @@ static inline bool nvme_addr_is_iomem(NvmeCtrlBase *n, hwaddr addr)
 }
 
 /*
- * CMB/PMR-aware address operations and queue add-ons, implemented by
- * the test device (test/ctrl.c). The test device is the only device
- * model using the core at this point, so core/dptr.c and core/queue.c
- * call these directly; dispatch through a QOM base class arrives with
- * the production device ("move device dispatch hooks to a QOM base
- * class").
+ * CMB/PMR-aware address operations and the submission queue bottom
+ * half, implemented by the test device (test/ctrl.c). The test device
+ * is the only device model using the core at this point, so
+ * core/dptr.c and core/queue.c call these directly; dispatch through
+ * a QOM base class arrives with the production device ("move device
+ * dispatch hooks to a QOM base class").
  *
- * The queue add-ons, called from core/queue.c:
- *
- *  - nvme_cq_setup()/nvme_sq_setup() are called when a
- *    queue is created or restored, before the queue is attached to
- *    the controller; they wire up ioeventfd on top of the common
- *    queue initialization (the doorbell buffer shadow addresses are
- *    wired up in core since DBBUF support is shared).
- *  - nvme_cq_teardown()/nvme_sq_teardown() tear the ioeventfd wiring
- *    down when a queue is freed.
- *  - nvme_process_sq() is the submission queue bottom half callback
- *    (the submission queue command dispatch is not shared).
+ * nvme_process_sq() is the submission queue bottom half callback
+ * (the submission queue command dispatch is not shared). The ioeventfd
+ * wiring is common and lives in core/queue.c.
  */
 uint16_t nvme_map_addr(NvmeCtrlBase *n, NvmeSg *sg, hwaddr addr, size_t len);
 int nvme_addr_read(NvmeCtrlBase *n, hwaddr addr, void *buf, int size);
 int nvme_addr_write(NvmeCtrlBase *n, hwaddr addr, const void *buf, int size);
 bool nvme_is_dma_addr(NvmeCtrlBase *n, hwaddr addr);
-void nvme_cq_setup(struct NvmeCQueue *cq);
-void nvme_cq_teardown(struct NvmeCQueue *cq);
-void nvme_sq_setup(struct NvmeSQueue *sq);
-void nvme_sq_teardown(struct NvmeSQueue *sq);
 void nvme_process_sq(void *opaque);
 
 /*
@@ -509,6 +513,7 @@ void nvme_irq_check_intx(NvmeCtrlBase *n);
 void nvme_irq_msix(NvmeCtrlBase *n, int vector);
 void nvme_irq_msi(NvmeCtrlBase *n);
 
+void nvme_cq_kick(NvmeCQueue *cq);
 void nvme_init_cq_common(NvmeCQueue *cq);
 void nvme_init_cq(NvmeCQueue *cq, NvmeCtrlBase *n, uint64_t dma_addr,
                   uint16_t cqid, uint16_t vector, uint16_t size,
@@ -529,12 +534,7 @@ uint16_t nvme_create_sq(NvmeCtrlBase *n, NvmeRequest *req);
 
 /*
  * Shadow doorbell buffer (DBBUF) support, common to both devices.
- * The helpers are also used by the test device ioeventfd notifiers.
  */
-void nvme_cq_set_eventidx(const NvmeCQueue *cq);
-bool nvme_cq_update_head(NvmeCQueue *cq);
-void nvme_sq_set_eventidx(const NvmeSQueue *sq);
-bool nvme_sq_update_tail(NvmeSQueue *sq);
 uint16_t nvme_dbbuf_config(NvmeCtrlBase *n, const NvmeRequest *req);
 
 #endif /* HW_NVME_NVME_H */
