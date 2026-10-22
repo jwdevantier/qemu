@@ -1,11 +1,11 @@
 /*
  * QEMU NVM Express shared queue plumbing (core)
  *
- * Submission and completion queue mechanics: queue creation, deletion,
  * Submission and completion queue mechanics: queue creation, deletion
  * and teardown, completion posting, the shadow doorbell buffer
- * configuration and the per-queue ioeventfd wiring, with
- * device-specific behavior hooked through NvmeCtrlBase ops.
+ * configuration and the per-queue ioeventfd wiring. Interrupt
+ * delivery lives in core/irq.c and the generic admin command
+ * semantics in core/admin.c.
  *
  * This code is covered by the QEMU security policy.
  *

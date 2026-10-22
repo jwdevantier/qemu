@@ -16,13 +16,22 @@
 
 static void nvme_base_class_init(ObjectClass *oc, const void *data)
 {
+    NvmeBaseClass *bc = NVME_BASE_CLASS(oc);
+
     /*
-     * No defaults to install: io_cmd/admin_cmd have no default (every
-     * device must install its command dispatch in its own class_init),
-     * sq_admit is optional and defaults to NULL, and 'bounce'
-     * defaults to false (reject non-mappable data pointers; only the
-     * test device opts into bouncing).
+     * Install the generic admin command semantics as class defaults:
+     * a device model that does not override admin_cmd inherits the
+     * generic dispatcher, which delegates commands outside the
+     * generic set to admin_cmd_custom (defaulting to a rejection).
+     *
+     * io_cmd has no default (every device must install its command
+     * dispatch in its own class_init), sq_admit and process_aers are
+     * optional and default to NULL, and 'bounce' defaults to false
+     * (reject non-mappable data pointers; only the test device opts
+     * into bouncing).
      */
+    bc->admin_cmd = nvme_admin_cmd;
+    bc->admin_cmd_custom = nvme_admin_cmd_custom;
 }
 
 static const TypeInfo nvme_base_info = {

@@ -736,9 +736,13 @@ uint16_t nvme_bounce_mdata(NvmeCtrlBase *n, void *ptr, uint32_t len,
     return nvme_tx(&req->iov, ptr, len, dir);
 }
 
-static void nvme_process_aers(void *opaque)
+/*
+ * NvmeBaseClass.process_aers hook (see core/queue.c): dispatch
+ * queued asynchronous events to outstanding AER commands.
+ */
+static void nvme_process_aers(NvmeCtrlBase *bn)
 {
-    NvmeCtrl *n = opaque;
+    NvmeCtrl *n = nvme_ctrl_of(bn);
     NvmeAsyncEvent *event, *next;
 
     trace_pci_nvme_process_aers(n->aer_queued);
@@ -802,7 +806,7 @@ static void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
     QTAILQ_INSERT_TAIL(&n->base.aer_queue, event, entry);
     n->aer_queued++;
 
-    nvme_process_aers(n);
+    nvme_process_aers(&n->base);
 }
 
 static void nvme_smart_event(NvmeCtrl *n, uint8_t event)
@@ -5015,49 +5019,6 @@ static uint16_t nvme_identify(NvmeCtrl *n, NvmeRequest *req)
     }
 }
 
-static uint16_t nvme_abort(NvmeCtrl *n, NvmeRequest *req)
-{
-    uint16_t sqid = le32_to_cpu(req->cmd.cdw10) & 0xffff;
-    uint16_t cid  = (le32_to_cpu(req->cmd.cdw10) >> 16) & 0xffff;
-    NvmeSQueue *sq;
-    NvmeRequest *r, *next;
-    int i;
-
-    req->cqe.result = 1;
-    if (nvme_check_sqid(&n->base, sqid)) {
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
-    sq = n->base.sq[sqid];
-
-    if (sqid == 0) {
-        for (i = 0; i < n->base.outstanding_aers; i++) {
-            NvmeRequest *re = n->base.aer_reqs[i];
-            if (re->cqe.cid == cid) {
-                memmove(n->base.aer_reqs + i, n->base.aer_reqs + i + 1,
-                         (n->base.outstanding_aers - i - 1) * sizeof(NvmeRequest *));
-                n->base.outstanding_aers--;
-                re->status = NVME_CMD_ABORT_REQ;
-                req->cqe.result = 0;
-                nvme_enqueue_req_completion(&n->base.admin_cq, re);
-                return NVME_SUCCESS;
-            }
-        }
-    }
-
-    QTAILQ_FOREACH_SAFE(r, &sq->out_req_list, entry, next) {
-        if (r->cqe.cid == cid) {
-            if (r->aiocb) {
-                r->status = NVME_CMD_ABORT_REQ;
-                blk_aio_cancel_async(r->aiocb);
-            }
-            break;
-        }
-    }
-
-    return NVME_SUCCESS;
-}
-
 static inline void nvme_set_timestamp(NvmeCtrl *n, uint64_t ts)
 {
     trace_pci_nvme_setfeat_timestamp(ts);
@@ -5664,25 +5625,6 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
         return NVME_FEAT_NOT_CHANGEABLE | NVME_DNR;
     }
     return NVME_SUCCESS;
-}
-
-static uint16_t nvme_aer(NvmeCtrl *n, NvmeRequest *req)
-{
-    trace_pci_nvme_aer(nvme_cid(req));
-
-    if (n->base.outstanding_aers > n->base.params.aerl) {
-        trace_pci_nvme_aer_aerl_exceeded();
-        return NVME_AER_LIMIT_EXCEEDED;
-    }
-
-    n->base.aer_reqs[n->base.outstanding_aers] = req;
-    n->base.outstanding_aers++;
-
-    if (!QTAILQ_EMPTY(&n->base.aer_queue)) {
-        nvme_process_aers(n);
-    }
-
-    return NVME_NO_COMPLETE;
 }
 
 static void nvme_update_dsm_limits(NvmeCtrl *n, NvmeNamespace *ns)
@@ -6452,7 +6394,7 @@ static uint16_t nvme_directive_receive(NvmeCtrl *n, NvmeRequest *req)
     }
 }
 
-static uint16_t nvme_admin_cmd(NvmeCtrlBase *bn, NvmeRequest *req)
+static uint16_t nvme_admin_cmd_ext(NvmeCtrlBase *bn, NvmeRequest *req)
 {
     NvmeCtrl *n = nvme_ctrl_of(bn);
 
@@ -6474,32 +6416,18 @@ static uint16_t nvme_admin_cmd(NvmeCtrlBase *bn, NvmeRequest *req)
     }
 
     switch (req->cmd.opcode) {
-    case NVME_ADM_CMD_DELETE_SQ:
-        return nvme_del_sq(&n->base, req);
-    case NVME_ADM_CMD_CREATE_SQ:
-        return nvme_create_sq(&n->base, req);
     case NVME_ADM_CMD_GET_LOG_PAGE:
         return nvme_get_log(n, req);
-    case NVME_ADM_CMD_DELETE_CQ:
-        return nvme_del_cq(&n->base, req);
-    case NVME_ADM_CMD_CREATE_CQ:
-        return nvme_create_cq(&n->base, req);
     case NVME_ADM_CMD_IDENTIFY:
         return nvme_identify(n, req);
-    case NVME_ADM_CMD_ABORT:
-        return nvme_abort(n, req);
     case NVME_ADM_CMD_SET_FEATURES:
         return nvme_set_feature(n, req);
     case NVME_ADM_CMD_GET_FEATURES:
         return nvme_get_feature(n, req);
-    case NVME_ADM_CMD_ASYNC_EV_REQ:
-        return nvme_aer(n, req);
     case NVME_ADM_CMD_NS_ATTACHMENT:
         return nvme_ns_attachment(n, req);
     case NVME_ADM_CMD_VIRT_MNGMT:
         return nvme_virt_mngmt(n, req);
-    case NVME_ADM_CMD_DBBUF_CONFIG:
-        return nvme_dbbuf_config(&n->base, req);
     case NVME_ADM_CMD_FORMAT_NVM:
         return nvme_format(n, req);
     case NVME_ADM_CMD_DIRECTIVE_SEND:
@@ -6511,7 +6439,13 @@ static uint16_t nvme_admin_cmd(NvmeCtrlBase *bn, NvmeRequest *req)
     case NVME_ADM_CMD_SECURITY_RECV:
         return nvme_security_receive(n, req);
     default:
-        g_assert_not_reached();
+        /*
+         * Everything else chains to the generic dispatcher in
+         * core/queue.c (queue creation/deletion, abort, AER and the
+         * shadow doorbell buffer configuration); commands outside
+         * both sets are rejected there.
+         */
+        return nvme_admin_default(&n->base, req);
     }
 
     return NVME_INVALID_OPCODE | NVME_DNR;
@@ -9251,10 +9185,12 @@ static void nvme_class_init(ObjectClass *oc, const void *data)
 
     /* the test device command dispatch (retyped to NvmeCtrlBase) */
     bc->io_cmd = nvme_io_cmd;
-    bc->admin_cmd = nvme_admin_cmd;
+    bc->admin_cmd = nvme_admin_cmd_ext;
 
     /* the test device submission admission (atomic write batching) */
     bc->sq_admit = nvme_sq_admit;
+
+    bc->process_aers = nvme_process_aers;
 
     /* the test device bounces non-mappable data pointers (vnvme
      * rejects them with a Data Transfer Error) */

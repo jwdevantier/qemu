@@ -363,14 +363,28 @@ typedef struct NvmeCtrlBase {
  * device): the test device bounces such fragments through a host
  * buffer; other implementations may reject the command with a Data
  * Transfer Error instead.
+ *
+ * Class defaults: core installs default implementations of
+ * admin_cmd (the generic NVM Express admin command semantics) and
+ * admin_cmd_custom (rejecting any command outside that set) in
+ * nvme_base_class_init(); a device model inherits the generic
+ * dispatcher and only overrides admin_cmd_custom to add its own
+ * commands, or overrides admin_cmd entirely (the test device wraps
+ * the generic dispatcher with its command-effects gate and its
+ * extended command set).
+ *
+ * 'process_aers' is called by the core default AER handler when
+ * asynchronous events are queued; the test device installs its
+ * event dispatcher; devices that never queue events leave it NULL.
  */
 typedef struct NvmeBaseClass {
     PCIDeviceClass parent_class;
 
     uint16_t (*io_cmd)(NvmeCtrlBase *n, NvmeRequest *req);
     uint16_t (*admin_cmd)(NvmeCtrlBase *n, NvmeRequest *req);
-
+    uint16_t (*admin_cmd_custom)(NvmeCtrlBase *n, NvmeRequest *req);
     bool (*sq_admit)(NvmeSQueue *sq, NvmeRequest *req);
+    void (*process_aers)(NvmeCtrlBase *n);
 
     bool bounce;
 } NvmeBaseClass;
@@ -561,5 +575,26 @@ void nvme_process_sq(NvmeSQueue *sq);
  * Shadow doorbell buffer (DBBUF) support, common to both devices.
  */
 uint16_t nvme_dbbuf_config(NvmeCtrlBase *n, const NvmeRequest *req);
+
+/*
+ * Generic admin command semantics, implemented in core/admin.c and
+ * installed as the NvmeBaseClass admin_cmd default in nvme_base_class_init().
+ *
+ * Devices may implement either of two integration styles:
+ * - leave the default in place and only provide admin_cmd_custom
+ *   (the generic set plus a small custom set),
+ * - override admin_cmd entirely to add a gate and an extended switch,
+ *   chaining generic commands to nvme_admin_default() (the test
+ *   device: command-effects gate plus the extended command set).
+ */
+uint16_t nvme_admin_cmd(NvmeCtrlBase *n, NvmeRequest *req);
+uint16_t nvme_admin_default(NvmeCtrlBase *n, NvmeRequest *req);
+uint16_t nvme_admin_cmd_custom(NvmeCtrlBase *n, NvmeRequest *req);
+
+/*
+ * Generic admin payloads, shared by both devices.
+ */
+uint16_t nvme_abort(NvmeCtrlBase *n, NvmeRequest *req);
+uint16_t nvme_aer(NvmeCtrlBase *n, NvmeRequest *req);
 
 #endif /* HW_NVME_NVME_H */
