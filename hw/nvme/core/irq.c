@@ -1,8 +1,8 @@
 /*
  * QEMU NVM Express shared interrupt delivery (core)
  *
- * IRQ handling for the NVMe device models: all completions are
- * delivered through these helpers, so the
+ * IRQ handling shared by the vnvme (prod) and nvme (test) devices.
+ * Both devices deliver completions through these helpers, so the
  * interrupt delivery model exists in exactly one place:
  *
  *  - MSI-X: notify the CQ vector.

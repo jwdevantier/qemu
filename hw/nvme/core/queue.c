@@ -1,11 +1,12 @@
 /*
  * QEMU NVM Express shared queue plumbing (core)
  *
- * Submission and completion queue mechanics: queue creation, deletion
- * and teardown, completion posting, the shadow doorbell buffer
- * configuration and the per-queue ioeventfd wiring. Interrupt
- * delivery lives in core/irq.c and the generic admin command
- * semantics in core/admin.c.
+ * Submission and completion queue mechanics shared by the vnvme
+ * (prod) and nvme (test) devices: queue creation and deletion,
+ * command processing and completion posting, the shadow doorbell
+ * buffer configuration and the per-queue ioeventfd wiring.
+ * Interrupt delivery lives in core/irq.c and the generic admin
+ * command semantics in core/admin.c.
  *
  * This code is covered by the QEMU security policy.
  *
@@ -36,10 +37,11 @@ static inline bool nvme_msi_enabled(NvmeCtrlBase *n)
 /*
  * Check that the guest range [addr, addr + len) is directly accessible
  * memory (guest RAM, CMB or PMR) for the given access direction. Used
- * to validate the shadow doorbell buffer placement: since that memory
- * is accessed on the submission/completion paths without bouncing, an
- * unmappable range would leave the host polling on a stale shadow
- * buffer.
+ * to validate queue and shadow doorbell buffer placement: since that
+ * memory is accessed on the submission/completion paths without
+ * bouncing, the hardened (production) device requires it to be
+ * mappable up front instead of wedging in CSTS.FAILED (or silently
+ * dropping shadow doorbell updates) when an access fails at runtime.
  */
 static bool nvme_addr_is_mappable(NvmeCtrlBase *n, hwaddr addr, size_t len,
                                   bool is_write)
@@ -150,12 +152,13 @@ static bool nvme_sq_update_tail(NvmeSQueue *sq)
 }
 
 /*
- * Shadow doorbell notifier wiring (defined after the queue
- * lifecycle): when a doorbell buffer is configured, an event
- * notifier is registered on the queue's doorbell offset of the
- * doorbell MMIO region so doorbell writes can be dispatched by the
- * accelerator without trapping. The authoritative queue indices are
- * then taken from the shadow buffers.
+ * Shadow doorbell ioeventfd wiring (defined after the submission
+ * processing).
+ * When a doorbell buffer is configured, an event notifier is
+ * registered on the queue's doorbell offset of the doorbell MMIO
+ * region so doorbell writes can be dispatched by the accelerator
+ * without trapping. The authoritative queue indices are then taken
+ * from the shadow buffers.
  */
 static void nvme_cq_notifier(EventNotifier *e);
 static void nvme_cq_init_notifier(NvmeCQueue *cq);
@@ -366,6 +369,7 @@ uint16_t nvme_del_cq(NvmeCtrlBase *n, NvmeRequest *req)
 
 uint16_t nvme_create_cq(NvmeCtrlBase *n, NvmeRequest *req)
 {
+    NvmeBaseClass *bc = NVME_BASE_GET_CLASS(n);
     NvmeCreateCq *c = (NvmeCreateCq *)&req->cmd;
     NvmeCQueue *cq;
     uint16_t cqid = le16_to_cpu(c->cqid);
@@ -403,6 +407,20 @@ uint16_t nvme_create_cq(NvmeCtrlBase *n, NvmeRequest *req)
          * controller in CSTS.FAILED at the first completion posting
          * (the re-entrancy guard blocks the access) instead of failing
          * the creation here.
+         */
+        trace_pci_nvme_err_invalid_create_cq_addr(prp1);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (unlikely(!bc->bounce &&
+                 !nvme_addr_is_mappable(n, prp1, (qsize + 1) << iocqes,
+                                        true))) {
+        /*
+         * The production device requires the queue to be mappable for
+         * its lifetime: completions are posted without bouncing, so
+         * queues in foreign MMIO or unmapped memory are rejected up
+         * front instead of failing at runtime. The test device keeps
+         * the permissive semantics (mirroring its dptr bounce policy)
+         * with the runtime CFS failure as the backstop.
          */
         trace_pci_nvme_err_invalid_create_cq_addr(prp1);
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -574,6 +592,7 @@ uint16_t nvme_del_sq(NvmeCtrlBase *n, NvmeRequest *req)
 
 uint16_t nvme_create_sq(NvmeCtrlBase *n, NvmeRequest *req)
 {
+    NvmeBaseClass *bc = NVME_BASE_GET_CLASS(n);
     NvmeSQueue *sq;
     NvmeCreateSq *c = (NvmeCreateSq *)&req->cmd;
 
@@ -607,6 +626,20 @@ uint16_t nvme_create_sq(NvmeCtrlBase *n, NvmeRequest *req)
          * controller in CSTS.FAILED at the first command fetch (the
          * re-entrancy guard blocks the access) instead of failing the
          * creation here.
+         */
+        trace_pci_nvme_err_invalid_create_sq_addr(prp1);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (unlikely(!bc->bounce &&
+                 !nvme_addr_is_mappable(n, prp1, (qsize + 1) << NVME_SQES,
+                                        false))) {
+        /*
+         * The production device requires the queue to be mappable for
+         * its lifetime: commands are fetched without bouncing, so
+         * queues in foreign MMIO or unmapped memory are rejected up
+         * front instead of failing at runtime. The test device keeps
+         * the permissive semantics (mirroring its dptr bounce policy)
+         * with the runtime CFS failure as the backstop.
          */
         trace_pci_nvme_err_invalid_create_sq_addr(prp1);
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -662,7 +695,7 @@ void nvme_process_sq(NvmeSQueue *sq)
         nvme_req_clear(req);
         req->cqe.sq_id = cpu_to_le16(sq->sqid);
         req->cqe.cid = cmd.cid;
-        memcpy(&req->cmd, &cmd, sizeof(NvmeCmd));
+        memcpy(&req->cmd, &cmd, sizeof(cmd));
 
         if (nc->sq_admit && !nc->sq_admit(sq, req)) {
             /*

@@ -4,7 +4,8 @@
  * The admin command dispatcher installed as the NvmeBaseClass
  * admin_cmd default (see core/base.c), along with the generic
  * payloads it owns: the Abort Command and the Asynchronous Event
- * Request; a device model extends or restricts the set through the
+ * Request. Shared by the vnvme (prod) and nvme (test) devices; a
+ * device model extends or restricts the set through the
  * admin_cmd_custom class hook.
  *
  * This code is covered by the QEMU security policy.
@@ -157,8 +158,9 @@ uint16_t nvme_admin_cmd(NvmeCtrlBase *n, NvmeRequest *req)
 }
 
 /*
- * Base-class admin_cmd_custom default: reject any command outside the
- * generic admin set.
+ * Base-class admin_cmd_custom default: the production model installs
+ * its restricted extended set; for any other device (or any command
+ * outside that set), reject.
  */
 uint16_t nvme_admin_cmd_custom(NvmeCtrlBase *n, NvmeRequest *req)
 {

@@ -1,8 +1,8 @@
 /*
  * QEMU NVM Express — abstract device base class
  *
- * Registers the abstract 'nvme-base' type that the NVMe device models
- * derive from. This code is in the
+ * Registers the abstract 'nvme-base' type that the 'vnvme' (production)
+ * and 'nvme' (test) device models derive from. This code is in the
  * QEMU security boundary.
  *
  * Copyright (c) 2025 Samsung Electronics Co., Ltd.

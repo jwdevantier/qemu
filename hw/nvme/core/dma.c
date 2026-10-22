@@ -2,7 +2,7 @@
  * QEMU NVM Express — shared DMA transfer helpers
  *
  * Core transfer functions (controller-buffer ↔ guest DMA and direct block
- * I/O) for the NVMe device models. This
+ * I/O) shared by the production (`vnvme`) and test (`nvme`) devices. This
  * code is in the QEMU security boundary.
  *
  * All transfers operate on eagerly mapped host buffers (NvmeMap) or views

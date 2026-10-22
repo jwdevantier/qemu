@@ -1,8 +1,8 @@
 /*
  * QEMU NVM Express — shared data-path helpers (PRP/SGL mapping)
  *
- * Core PRP and SGL mapping code, shared by the NVMe device models.
- * This code is in the QEMU security boundary.
+ * Core PRP and SGL mapping code shared by the production (`vnvme`) and test
+ * (`nvme`) devices. This code is in the QEMU security boundary.
  *
  * Data buffers are mapped eagerly into host memory (see NvmeMap): each data
  * pointer fragment becomes either a direct mapping (guest RAM, CMB, PMR —

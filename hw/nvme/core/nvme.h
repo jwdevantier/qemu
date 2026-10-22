@@ -49,10 +49,17 @@ typedef struct NvmeCtrlBase NvmeCtrlBase;
 typedef struct NvmeNamespaceBase NvmeNamespaceBase;
 
 /*
- * Namespace device parameters: the base carries only the "legacy"
- * (drive-backed, controller-embedded) namespace with nsid 1. The
- * test device defines its own NvmeNamespaceParams (see test/nvme.h)
- * with the configurable namespace parameters (zoned, FDP, DIF, ...).
+ * The production device state. It is the base state verbatim; the test
+ * device derives from NvmeCtrlBase (see test/nvme.h).
+ */
+typedef struct NvmeCtrlBase VnvmeCtrl;
+
+/*
+ * Namespace device parameters shared with the production device: the
+ * production device only ever uses the "legacy" (drive-backed,
+ * controller-embedded) namespace with nsid 1. The test device defines
+ * its own NvmeNamespaceParams (see test/nvme.h) with the configurable
+ * namespace parameters (zoned, FDP, DIF, ...).
  */
 typedef struct NvmeNamespaceParamsBase {
     uint32_t    nsid;
@@ -62,7 +69,8 @@ typedef struct NvmeNamespaceParamsBase {
  * The shared namespace state: block configuration, geometry and the
  * Identify Namespace structure. The test device extends this into
  * NvmeNamespace (see test/nvme.h) with the namespace features (zoned,
- * FDP, DIF, atomic writes).
+ * FDP, DIF, atomic writes) that the production device does not
+ * implement.
  */
 typedef struct NvmeNamespaceBase {
     DeviceState  parent_obj;
@@ -243,10 +251,15 @@ typedef struct NvmeCQueue {
     QTAILQ_HEAD(, NvmeRequest) req_list;
 } NvmeCQueue;
 
+#define TYPE_VNVME "vnvme"
+#define VNVME(obj) \
+        OBJECT_CHECK(VnvmeCtrl, (obj), TYPE_VNVME)
+
 /*
- * Controller device parameters. The test device derives its own
- * NvmeParams (see test/nvme.h) with the configurable test device
- * parameters (cmb_size_mb, zasl, sr-iov, ...).
+ * Controller device parameters shared with the production device. The
+ * test device derives its own NvmeParams (see test/nvme.h) with the
+ * configurable test device parameters (cmb_size_mb, zasl, sr-iov,
+ * ...).
  */
 typedef struct NvmeParamsBase {
     char     *serial;
@@ -312,7 +325,9 @@ typedef struct NvmeCtrlBase {
     /*
      * Shadow doorbell buffer (DBBUF) state. The shadow addresses are
      * negotiated with the Doorbell Buffer Config admin command
-     * (nvme_dbbuf_config, core/queue.c).
+     * (nvme_dbbuf_config, core/queue.c) and are common state: prod
+     * supports the feature since relying on doorbell buffer traps is
+     * a major virtualization performance bottleneck.
      */
     uint64_t    dbbuf_dbs;
     uint64_t    dbbuf_eis;
@@ -320,9 +335,9 @@ typedef struct NvmeCtrlBase {
 
     /*
      * MMIO leaf region that carries the doorbell area: the test device
-     * registers its own "nvme" subregion on the BAR0 container. The
-     * dbbuf ioeventfd wiring (see core/queue.c) attaches its event
-     * notifiers to this region.
+     * registers its own "nvme" subregion on the BAR0 container, while
+     * prod uses the BAR0 region itself. The dbbuf ioeventfd wiring (see
+     * core/queue.c) attaches its event notifiers to this region.
      */
     MemoryRegion *db_region;
 
@@ -338,7 +353,7 @@ typedef struct NvmeCtrlBase {
 
 /*
  * Abstract base class for the NVMe device models: the 'nvme' test
- * device derives from it.
+ * device and the 'vnvme' production device both derive from it.
  *
  * It holds the dispatch hooks that the shared core code invokes:
  * the submission queue bottom half runs the core's fetch loop
@@ -348,21 +363,19 @@ typedef struct NvmeCtrlBase {
  * state.
  *
  * io_cmd() and admin_cmd() have no default and must be provided by
- * every device (the test device installs its nvme_io_cmd()/
- * nvme_admin_cmd() dispatch directly, retyped to NvmeCtrlBase).
- * sq_admit() is optional (a device whose submission processing
- * carries device-specific admission semantics installs it; the test
- * device holds back commands at atomic write batch boundaries; the
- * production device leaves it NULL): the core calls it once a
- * command has been fetched and its request set up, and a decline
- * makes the core put the request back, leave the command unconsumed
- * and retry on the next run of the bottom half.
+ * every device. sq_admit() is optional (a device whose submission
+ * processing carries device-specific admission semantics installs
+ * it; the test device holds back commands at atomic write batch
+ * boundaries; the production device leaves it NULL): the core calls
+ * it once a command has been fetched and its request set up, and a
+ * decline makes the core put the request back, leave the command
+ * unconsumed and retry on the next run of the bottom half.
  *
  * 'bounce' selects the policy for data pointers in memory that
  * address_space_map() cannot map directly (e.g. MMIO of another
  * device): the test device bounces such fragments through a host
- * buffer; other implementations may reject the command with a Data
- * Transfer Error instead.
+ * buffer, while the hardened production device rejects the command
+ * with a Data Transfer Error.
  *
  * Class defaults: core installs default implementations of
  * admin_cmd (the generic NVM Express admin command semantics) and
@@ -375,7 +388,8 @@ typedef struct NvmeCtrlBase {
  *
  * 'process_aers' is called by the core default AER handler when
  * asynchronous events are queued; the test device installs its
- * event dispatcher; devices that never queue events leave it NULL.
+ * event dispatcher, the production device never queues events and
+ * leaves it NULL.
  */
 typedef struct NvmeBaseClass {
     PCIDeviceClass parent_class;
@@ -503,7 +517,7 @@ static inline void nvme_map_wrap(NvmeMap *map, QEMUIOVector *view)
 }
 
 /*
- * Inline helpers shared by core/ and test/. These are small, hot
+ * Inline helpers shared by core/, prod/ and test/. These are small, hot
  * functions that benefit from inlining and only reference NvmeCtrlBase fields
  * already defined in this header.
  */
@@ -530,7 +544,7 @@ static inline bool nvme_addr_is_iomem(NvmeCtrlBase *n, hwaddr addr)
 
 /*
  * Functions implemented in core/dptr.c and core/dma.c. Declared here so
- * the device models can call them.
+ * both prod/ and test/ can call them.
  */
 uint16_t nvme_tx(QEMUIOVector *iov, void *ptr, uint32_t len,
                  NvmeTxDirection dir);
@@ -545,7 +559,7 @@ void nvme_blk_write(BlockBackend *blk, int64_t offset,
 
 /*
  * Interrupt delivery implemented in core/irq.c; queue mechanics in
- * core/queue.c. Declared here so the device models can call them.
+ * core/queue.c. Declared here so both prod/ and test/ can call them.
  */
 void nvme_irq_check_intx(NvmeCtrlBase *n);
 void nvme_irq_msix(NvmeCtrlBase *n, int vector);
@@ -582,7 +596,7 @@ uint16_t nvme_dbbuf_config(NvmeCtrlBase *n, const NvmeRequest *req);
  *
  * Devices may implement either of two integration styles:
  * - leave the default in place and only provide admin_cmd_custom
- *   (the generic set plus a small custom set),
+ *   (the production device: the generic set plus a small custom set),
  * - override admin_cmd entirely to add a gate and an extended switch,
  *   chaining generic commands to nvme_admin_default() (the test
  *   device: command-effects gate plus the extended command set).

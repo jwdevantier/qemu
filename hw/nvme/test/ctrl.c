@@ -518,11 +518,6 @@ static bool nvme_nsid_valid(NvmeCtrl *n, uint32_t nsid)
         (nsid == NVME_NSID_BROADCAST || nsid <= NVME_MAX_NAMESPACES);
 }
 
-static inline bool nvme_msix_enabled(NvmeCtrl *n)
-{
-    return msix_enabled(PCI_DEVICE(n));
-}
-
 /*
  * When metadata is transferred as extended LBAs, the eagerly mapped DPTR
  * buffer holds both data and metadata, interleaved per LBA. Carve a view
@@ -3946,6 +3941,7 @@ static void nvme_restore_sq(NvmeSQueue *sq_from)
 
     nvme_init_sq_common(sq);
 }
+
 struct nvme_stats {
     uint64_t units_read;
     uint64_t units_written;
@@ -4105,6 +4101,7 @@ static uint16_t nvme_endgrp_info(NvmeCtrl *n,  uint8_t rae, uint32_t buf_len,
 
     return nvme_c2h(&n->base, (uint8_t *)&info + off, trans_len, buf_len, req);
 }
+
 
 static uint16_t nvme_fw_log_info(NvmeCtrl *n, uint32_t buf_len, uint64_t off,
                                  NvmeRequest *req)
@@ -4551,6 +4548,7 @@ static void nvme_restore_cq(NvmeCQueue *cq_from)
 
     nvme_init_cq_common(cq);
 }
+
 static uint16_t nvme_rpt_empty_id_struct(NvmeCtrl *n, NvmeRequest *req)
 {
     uint8_t id[NVME_IDENTIFY_DATA_SIZE] = {};
@@ -6575,49 +6573,6 @@ static NvmeAtomic *nvme_get_atomic(NvmeCtrl *n, NvmeCmd *cmd)
     return NULL;
 }
 
-/*
- * Submission admission (NvmeBaseClass.sq_admit, called by the core
- * fetch loop in core/queue.c once a command has been fetched and its
- * request set up): the atomic write batching. A write crossing an
- * atomic boundary may have to be held back until the currently
- * outstanding write has completed, and commands that are part of an
- * atomic write sequence are flagged so that later submissions do not
- * overlap them. This is deliberately kept out of the hardened core
- * (and out of the production device entirely).
- */
-static bool nvme_sq_admit(NvmeSQueue *sq, NvmeRequest *req)
-{
-    NvmeCtrl *n = nvme_ctrl_from_sq(sq);
-    NvmeAtomic *atomic;
-
-    if (!sq->sqid) {
-        return true;
-    }
-
-    atomic = nvme_get_atomic(n, &req->cmd);
-    if (!atomic) {
-        return true;
-    }
-
-    switch (nvme_atomic_write_check(n, &req->cmd, atomic)) {
-    case NVME_ATOMIC_NO_START:
-        /*
-         * The command cannot be started yet (atomic write batch
-         * boundary); the core puts the request back and retries on
-         * the next run of the queue's bottom half.
-         */
-        return false;
-    case NVME_ATOMIC_START_ATOMIC:
-        req->flags |= NVME_REQ_ATOMIC_WRITE;
-        break;
-    case NVME_ATOMIC_START_NONATOMIC:
-    default:
-        break;
-    }
-
-    return true;
-}
-
 static void nvme_update_msixcap_ts(PCIDevice *pci_dev, uint32_t table_size)
 {
     uint8_t *config;
@@ -7147,6 +7102,50 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
     }
 
     return ldn_le_p(ptr + addr, size);
+}
+
+
+/*
+ * Submission admission (NvmeBaseClass.sq_admit, called by the core
+ * fetch loop in core/queue.c once a command has been fetched and its
+ * request set up): the atomic write batching. A write crossing an
+ * atomic boundary may have to be held back until the currently
+ * outstanding write has completed, and commands that are part of an
+ * atomic write sequence are flagged so that later submissions do not
+ * overlap them. This is deliberately kept out of the hardened core
+ * (and out of the production device entirely).
+ */
+static bool nvme_sq_admit(NvmeSQueue *sq, NvmeRequest *req)
+{
+    NvmeCtrl *n = nvme_ctrl_from_sq(sq);
+    NvmeAtomic *atomic;
+
+    if (!sq->sqid) {
+        return true;
+    }
+
+    atomic = nvme_get_atomic(n, &req->cmd);
+    if (!atomic) {
+        return true;
+    }
+
+    switch (nvme_atomic_write_check(n, &req->cmd, atomic)) {
+    case NVME_ATOMIC_NO_START:
+        /*
+         * The command cannot be started yet (atomic write batch
+         * boundary); the core puts the request back and retries on
+         * the next run of the queue's bottom half.
+         */
+        return false;
+    case NVME_ATOMIC_START_ATOMIC:
+        req->flags |= NVME_REQ_ATOMIC_WRITE;
+        break;
+    case NVME_ATOMIC_START_NONATOMIC:
+    default:
+        break;
+    }
+
+    return true;
 }
 
 static inline bool nvme_cq_head_ok(NvmeCQueue *cq, uint16_t head)

@@ -3,3 +3,8 @@ config NVME_PCI
     default y if PCI_DEVICES || PCIE_DEVICES
     depends on PCI
     select SPDM_SOCKET
+
+config VNVME_PCI
+    bool
+    default y if PCI_DEVICES || PCIE_DEVICES
+    depends on PCI
