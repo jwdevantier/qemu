@@ -19,8 +19,11 @@
 #define HW_NVME_NVME_H
 
 #include "qemu/uuid.h"
+#include "qemu/log.h"
+#include "qemu/aiocb.h"
 #include "hw/pci/pci_device.h"
 #include "hw/block/block.h"
+#include "system/hostmem.h"
 
 #include "block/nvme.h"
 
@@ -38,6 +41,13 @@
 #define NVME_CQES 4
 
 QEMU_BUILD_BUG_ON(NVME_MAX_NAMESPACES > NVME_NSID_BROADCAST - 1);
+
+#define NVME_GUEST_ERR(trace, fmt, ...) \
+    do { \
+        (trace_##trace)(__VA_ARGS__); \
+        qemu_log_mask(LOG_GUEST_ERROR, #trace \
+            " in %s: " fmt "\n", __func__, ## __VA_ARGS__); \
+    } while (0)
 
 typedef struct NvmeCtrl NvmeCtrl;
 typedef struct NvmeNamespace NvmeNamespace;
@@ -770,7 +780,8 @@ uint16_t nvme_bounce_data(NvmeCtrl *n, void *ptr, uint32_t len,
 uint16_t nvme_bounce_mdata(NvmeCtrl *n, void *ptr, uint32_t len,
                            NvmeTxDirection dir, NvmeRequest *req);
 void nvme_rw_complete_cb(void *opaque, int ret);
-uint16_t nvme_map_dptr(NvmeCtrl *n, NvmeSg *sg, size_t len, NvmeCmd *cmd);
+uint16_t nvme_map_dptr(NvmeCtrl *n, NvmeSg *sg, size_t len,
+                       NvmeCmd *cmd);
 
 void nvme_atomic_configure_max_write_size(bool dn, uint16_t awun,
                                           uint16_t awupf, NvmeAtomic *atomic);
@@ -781,5 +792,88 @@ void nvme_ctrl_notify_ns_resize(NvmeCtrl *ctrl, NvmeNamespace *ns);
 
 extern const VMStateDescription nvme_vmstate_atomic;
 extern const VMStateDescription nvme_vmstate_ns;
+
+/*
+ * Inline helpers shared by core/ and test/. These are small, hot
+ * functions that benefit from inlining and only reference NvmeCtrl fields
+ * already defined in this header.
+ */
+
+static inline void nvme_req_clear(NvmeRequest *req)
+{
+    req->ns = NULL;
+    req->opaque = NULL;
+    req->aiocb = NULL;
+    memset(&req->cqe, 0x0, sizeof(req->cqe));
+    req->status = NVME_SUCCESS;
+    req->flags = 0;
+}
+
+static inline void nvme_sg_init(NvmeCtrl *n, NvmeSg *sg, bool dma)
+{
+    if (dma) {
+        pci_dma_sglist_init(&sg->qsg, PCI_DEVICE(n), 0);
+        sg->flags = NVME_SG_DMA;
+    } else {
+        qemu_iovec_init(&sg->iov, 0);
+    }
+
+    sg->flags |= NVME_SG_ALLOC;
+}
+
+static inline void nvme_sg_unmap(NvmeSg *sg)
+{
+    if (!(sg->flags & NVME_SG_ALLOC)) {
+        return;
+    }
+
+    if (sg->flags & NVME_SG_DMA) {
+        qemu_sglist_destroy(&sg->qsg);
+    } else {
+        qemu_iovec_destroy(&sg->iov);
+    }
+
+    memset(sg, 0x0, sizeof(*sg));
+}
+
+static inline bool nvme_addr_is_iomem(NvmeCtrl *n, hwaddr addr)
+{
+    hwaddr hi, lo;
+
+    lo = n->bar0.addr;
+    hi = lo + int128_get64(n->bar0.size);
+
+    return addr >= lo && addr < hi;
+}
+
+/*
+ * CMB/PMR-aware address operations, implemented by the test device
+ * (test/ctrl.c). The test device is the only device model using the
+ * core at this point, so core/dptr.c calls these directly; dispatch
+ * through a QOM base class arrives with the production device ("move
+ * device dispatch hooks to a QOM base class").
+ */
+uint16_t nvme_map_addr(NvmeCtrl *n, NvmeSg *sg, hwaddr addr, size_t len);
+int nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size);
+int nvme_addr_write(NvmeCtrl *n, hwaddr addr, const void *buf, int size);
+bool nvme_is_dma_addr(NvmeCtrl *n, hwaddr addr);
+
+/*
+ * Functions implemented in core/dptr.c and core/dma.c. Declared here so
+ * the device models can call them.
+ */
+uint16_t nvme_map_sgl(NvmeCtrl *n, NvmeSg *sg, NvmeSglDescriptor sgl,
+                      size_t len, NvmeCmd *cmd);
+
+uint16_t nvme_tx(NvmeCtrl *n, NvmeSg *sg, void *ptr, uint32_t len,
+                 NvmeTxDirection dir);
+uint16_t nvme_c2h(NvmeCtrl *n, void *ptr, size_t len, uint32_t hostlen,
+                  NvmeRequest *req);
+uint16_t nvme_h2c(NvmeCtrl *n, void *ptr, uint32_t len, NvmeRequest *req);
+
+void nvme_blk_read(BlockBackend *blk, int64_t offset, uint32_t align,
+                   BlockCompletionFunc *cb, NvmeRequest *req);
+void nvme_blk_write(BlockBackend *blk, int64_t offset, uint32_t align,
+                    BlockCompletionFunc *cb, NvmeRequest *req);
 
 #endif /* HW_NVME_NVME_H */
