@@ -4996,6 +4996,16 @@ static uint16_t nvme_create_sq(NvmeCtrl *n, NvmeRequest *req)
         trace_pci_nvme_err_invalid_create_sq_addr(prp1);
         return NVME_INVALID_PRP_OFFSET | NVME_DNR;
     }
+    if (unlikely(nvme_addr_is_iomem(n, prp1))) {
+        /*
+         * Placing a queue in the controller's own MMIO would wedge the
+         * controller in CSTS.FAILED at the first command fetch (the
+         * re-entrancy guard blocks the access) instead of failing the
+         * creation here.
+         */
+        trace_pci_nvme_err_invalid_create_sq_addr(prp1);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     if (unlikely(!(NVME_SQ_FLAGS_PC(qflags)))) {
         trace_pci_nvme_err_invalid_create_sq_qflags(NVME_SQ_FLAGS_PC(qflags));
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -5733,6 +5743,16 @@ static uint16_t nvme_create_cq(NvmeCtrl *n, NvmeRequest *req)
     if (unlikely(prp1 & (n->page_size - 1))) {
         trace_pci_nvme_err_invalid_create_cq_addr(prp1);
         return NVME_INVALID_PRP_OFFSET | NVME_DNR;
+    }
+    if (unlikely(nvme_addr_is_iomem(n, prp1))) {
+        /*
+         * Placing a queue in the controller's own MMIO would wedge the
+         * controller in CSTS.FAILED at the first completion posting
+         * (the re-entrancy guard blocks the access) instead of failing
+         * the creation here.
+         */
+        trace_pci_nvme_err_invalid_create_cq_addr(prp1);
+        return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (unlikely(!msix_enabled(PCI_DEVICE(n)) && vector)) {
         trace_pci_nvme_err_invalid_create_cq_vector(vector);
