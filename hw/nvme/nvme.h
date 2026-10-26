@@ -533,10 +533,9 @@ typedef struct NvmeCQueue {
     struct NvmeCtrl *ctrl;
     uint8_t     phase;
     uint16_t    cqid;
-    uint16_t    irq_enabled;
     uint32_t    head;
     uint32_t    tail;
-    uint32_t    vector;
+    int         vector;
     uint32_t    size;
     uint64_t    dma_addr;
     uint64_t    db_addr;
@@ -603,8 +602,6 @@ typedef struct NvmeCtrl {
     uint16_t    max_prp_ents;
     uint32_t    max_q_ents;
     uint8_t     outstanding_aers;
-    uint32_t    irq_status;
-    int         cq_pending;
     uint64_t    host_timestamp;                 /* Timestamp sent by the host */
     uint64_t    timestamp_set_qemu_clock_ms;    /* QEMU clock time */
     uint64_t    starttime_ms;
@@ -684,6 +681,12 @@ typedef struct NvmeCtrl {
 
     /* Migration-related stuff */
     Error *migration_blocker;
+
+    struct {
+        struct {
+            int pending;
+        } intx;
+    } irq;
 } NvmeCtrl;
 
 typedef enum NvmeResetType {

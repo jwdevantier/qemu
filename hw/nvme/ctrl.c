@@ -666,62 +666,34 @@ static inline bool nvme_sq_full(NvmeSQueue *sq)
     return (sq->tail + 1) % sq->size == sq->head;
 }
 
-static void nvme_irq_check(NvmeCtrl *n)
+static void nvme_irq_check_intx(NvmeCtrl *n)
 {
     PCIDevice *pci = PCI_DEVICE(n);
     uint32_t intms = ldl_le_p(&n->bar.intms);
+    int level = n->irq.intx.pending > 0 && (~intms & 1) ? 1 : 0;
 
-    trace_pci_nvme_irq_check(intms, n->irq_status);
-
-    if (msix_enabled(pci)) {
-        return;
-    }
-
-    /* vfs does not implement intx */
+    /* vfs does not implement intx. */
     if (pci_is_vf(pci)) {
         return;
     }
 
-    if (~intms & n->irq_status) {
-        trace_pci_nvme_irq_pin(1);
-        pci_irq_assert(pci);
-    } else {
-        trace_pci_nvme_irq_pin(0);
-        pci_irq_deassert(pci);
-    }
+    trace_pci_nvme_irq_check_intx(intms);
+
+    pci_set_irq(pci, level);
 }
 
-static void nvme_irq_assert(NvmeCtrl *n, NvmeCQueue *cq)
+static void nvme_irq_msix(NvmeCtrl *n, int vector)
 {
     PCIDevice *pci = PCI_DEVICE(n);
 
-    if (cq->irq_enabled) {
-        if (msix_enabled(pci)) {
-            trace_pci_nvme_irq_msix(cq->vector);
-            msix_notify(pci, cq->vector);
-        } else {
-            assert(cq->vector < 32);
-            n->irq_status |= 1 << cq->vector;
-            nvme_irq_check(n);
-        }
-    } else {
-        trace_pci_nvme_irq_masked();
-    }
+    trace_pci_nvme_irq_msix(vector);
+
+    msix_notify(pci, vector);
 }
 
-static void nvme_irq_deassert(NvmeCtrl *n, NvmeCQueue *cq)
+static inline bool nvme_msix_enabled(NvmeCtrl *n)
 {
-    if (cq->irq_enabled) {
-        if (msix_enabled(PCI_DEVICE(n))) {
-            return;
-        } else {
-            assert(cq->vector < 32);
-            if (!n->cq_pending) {
-                n->irq_status &= ~(1 << cq->vector);
-            }
-            nvme_irq_check(n);
-        }
-    }
+    return msix_enabled(PCI_DEVICE(n));
 }
 
 static void nvme_req_clear(NvmeRequest *req)
@@ -1570,12 +1542,19 @@ static void nvme_post_cqes(void *opaque)
 
         QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
     }
-    if (cq->tail != cq->head) {
-        if (cq->irq_enabled && !pending) {
-            n->cq_pending++;
-        }
 
-        nvme_irq_assert(n, cq);
+    if (cq->vector < 0) {
+        return;
+    }
+
+    if (cq->tail != cq->head) {
+        if (nvme_msix_enabled(n)) {
+            nvme_irq_msix(n, cq->vector);
+        } else if (!pending) {
+            n->irq.intx.pending++;
+
+            nvme_irq_check_intx(n);
+        }
     }
 }
 
@@ -4790,11 +4769,11 @@ static void nvme_cq_notifier(EventNotifier *e)
     nvme_update_cq_head(cq);
 
     if (cq->tail == cq->head) {
-        if (cq->irq_enabled) {
-            n->cq_pending--;
-        }
+        if (cq->vector != -1 && !nvme_msix_enabled(n)) {
+            n->irq.intx.pending--;
 
-        nvme_irq_deassert(n, cq);
+            nvme_irq_check_intx(n);
+        }
     }
 
     qemu_bh_schedule(cq->bh);
@@ -5613,7 +5592,7 @@ static void nvme_free_cq(NvmeCQueue *cq, NvmeCtrl *n)
         event_notifier_set_handler(&cq->notifier, NULL);
         event_notifier_cleanup(&cq->notifier);
     }
-    if (msix_present(pci) && cq->irq_enabled) {
+    if (msix_present(pci) && cq->vector != -1) {
         msix_vector_unuse(pci, cq->vector);
     }
     if (cq->cqid) {
@@ -5638,11 +5617,12 @@ static uint16_t nvme_del_cq(NvmeCtrl *n, NvmeRequest *req)
         return NVME_INVALID_QUEUE_DEL;
     }
 
-    if (cq->irq_enabled && cq->tail != cq->head) {
-        n->cq_pending--;
+    if (!nvme_cq_empty(cq) && cq->vector != -1 && !nvme_msix_enabled(n)) {
+        n->irq.intx.pending--;
+
+        nvme_irq_check_intx(n);
     }
 
-    nvme_irq_deassert(n, cq);
     trace_pci_nvme_del_cq(qid);
     nvme_free_cq(cq, n);
     return NVME_SUCCESS;
@@ -5654,7 +5634,7 @@ static void __nvme_init_cq(NvmeCQueue *cq)
     PCIDevice *pci = PCI_DEVICE(n);
     uint16_t cqid = cq->cqid;
 
-    if (msix_present(pci) && cq->irq_enabled) {
+    if (msix_present(pci) && cq->vector != -1) {
         msix_vector_use(pci, cq->vector);
     }
 
@@ -5683,8 +5663,7 @@ static void nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
     cq->size = size;
     cq->dma_addr = dma_addr;
     cq->phase = 1;
-    cq->irq_enabled = irq_enabled;
-    cq->vector = vector;
+    cq->vector = irq_enabled ? vector : -1;
     cq->head = cq->tail = 0;
     QTAILQ_INIT(&cq->req_list);
     __nvme_init_cq(cq);
@@ -5712,7 +5691,6 @@ static void nvme_restore_cq(NvmeCQueue *cq_from)
         cq->size = cq_from->size;
         cq->dma_addr = cq_from->dma_addr;
         cq->phase = cq_from->phase;
-        cq->irq_enabled = cq_from->irq_enabled;
         cq->vector = cq_from->vector;
         cq->head = cq_from->head;
         cq->tail = cq_from->tail;
@@ -8307,7 +8285,7 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
         stl_le_p(&n->bar.intms, intms);
         n->bar.intmc = n->bar.intms;
         trace_pci_nvme_mmio_intm_set(data & 0xffffffff, intms);
-        nvme_irq_check(n);
+        nvme_irq_check_intx(n);
         break;
     case NVME_REG_INTMC:
         if (unlikely(msix_enabled(pci))) {
@@ -8320,7 +8298,7 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
         stl_le_p(&n->bar.intms, intms);
         n->bar.intmc = n->bar.intms;
         trace_pci_nvme_mmio_intm_clr(data & 0xffffffff, intms);
-        nvme_irq_check(n);
+        nvme_irq_check_intx(n);
         break;
     case NVME_REG_CC:
         stl_le_p(&n->bar.cc, data);
@@ -8640,11 +8618,11 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
         }
 
         if (cq->tail == cq->head) {
-            if (cq->irq_enabled) {
-                n->cq_pending--;
-            }
+            if (cq->vector != -1 && !nvme_msix_enabled(n)) {
+                n->irq.intx.pending--;
 
-            nvme_irq_deassert(n, cq);
+                nvme_irq_check_intx(n);
+            }
         }
     } else {
         /* Submission queue doorbell write */
@@ -10069,16 +10047,15 @@ static bool nvme_cqueue_pre_load(void *opaque, Error **errp)
 
 static const VMStateDescription nvme_vmstate_cqueue = {
     .name = "nvme-cq",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .pre_load_errp = nvme_cqueue_pre_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8(phase, NvmeCQueue),
         VMSTATE_UINT16(cqid, NvmeCQueue),
-        VMSTATE_UINT16(irq_enabled, NvmeCQueue),
         VMSTATE_UINT32(head, NvmeCQueue),
         VMSTATE_UINT32(tail, NvmeCQueue),
-        VMSTATE_UINT32(vector, NvmeCQueue),
+        VMSTATE_INT32(vector, NvmeCQueue),
         VMSTATE_UINT32(size, NvmeCQueue),
         VMSTATE_UINT64(dma_addr, NvmeCQueue),
 
@@ -10552,13 +10529,25 @@ static bool nvme_ctrl_post_load(void *opaque, int version_id, Error **errp)
         qemu_bh_schedule(sq->bh);
     }
 
+    /*
+     * The interrupt pin level is derived state (from the migrated
+     * pending counter and interrupt mask). The line level itself is
+     * not part of the stream: the generic PCI state moves the irq_state
+     * bitmap (and the bus counts) without replaying the line level, so
+     * a plain re-evaluation would be a no-op (the bitmap already
+     * matches the computed level). Drive the pin down and evaluate
+     * from the migrated state to replay the actual level.
+     */
+    pci_set_irq(PCI_DEVICE(n), 0);
+    nvme_irq_check_intx(n);
+
     return true;
 }
 
 static const VMStateDescription nvme_vmstate = {
     .name = "nvme",
-    .minimum_version_id = 1,
-    .version_id = 1,
+    .minimum_version_id = 2,
+    .version_id = 2,
     .pre_save_errp = nvme_ctrl_pre_save,
     .post_load_errp = nvme_ctrl_post_load,
     .fields = (const VMStateField[]) {
@@ -10572,8 +10561,7 @@ static const VMStateDescription nvme_vmstate = {
         VMSTATE_UINT16(max_prp_ents, NvmeCtrl),
         VMSTATE_UINT32(max_q_ents, NvmeCtrl),
         VMSTATE_UINT8(outstanding_aers, NvmeCtrl),
-        VMSTATE_UINT32(irq_status, NvmeCtrl),
-        VMSTATE_INT32(cq_pending, NvmeCtrl),
+        VMSTATE_INT32(irq.intx.pending, NvmeCtrl),
 
         VMSTATE_UINT64(host_timestamp, NvmeCtrl),
         VMSTATE_UINT64(timestamp_set_qemu_clock_ms, NvmeCtrl),
