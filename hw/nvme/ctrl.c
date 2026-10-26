@@ -576,6 +576,43 @@ static inline bool nvme_addr_is_iomem(NvmeCtrl *n, hwaddr addr)
     return addr >= lo && addr < hi;
 }
 
+/*
+ * Check that the guest range [addr, addr + len) is directly accessible
+ * memory (guest RAM, CMB or PMR) for the given access direction. Used
+ * to validate the shadow doorbell buffer placement: since that memory
+ * is accessed on the submission/completion paths without bouncing, an
+ * unmappable range would leave the host polling on a stale shadow
+ * buffer.
+ */
+static bool nvme_addr_is_mappable(NvmeCtrl *n, hwaddr addr, size_t len,
+                                  bool is_write)
+{
+    AddressSpace *as = pci_get_address_space(PCI_DEVICE(n));
+    const MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
+
+    if (UINT64_MAX - addr < len) {
+        return false;
+    }
+
+    while (len) {
+        hwaddr xlat;
+        MemoryRegion *mr;
+        hwaddr clen = len;
+
+        mr = address_space_translate(as, addr, &xlat, &clen, is_write, attrs);
+
+        if (unlikely(!clen) ||
+            !memory_access_is_direct(mr, is_write, attrs)) {
+            return false;
+        }
+
+        addr += clen;
+        len -= clen;
+    }
+
+    return true;
+}
+
 static int nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size)
 {
     hwaddr hi = addr + size - 1;
@@ -7428,6 +7465,24 @@ static uint16_t nvme_dbbuf_config(NvmeCtrl *n, const NvmeRequest *req)
 
     /* Address should be page aligned */
     if (dbs_addr & (n->page_size - 1) || eis_addr & (n->page_size - 1)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    /*
+     * The shadow buffers are accessed without bouncing: the device
+     * initializes the shadow doorbells, writes the event indexes on
+     * every consumption, and re-reads the doorbells when a queue is
+     * kicked. Validate the ranges up front instead of silently
+     * dropping the per-queue writes below - a stale shadow buffer can
+     * wedge a host polling on it. CAP.DSTRD is 0, so the entries are 8
+     * bytes apart and the last byte touched (the last cq doorbell at
+     * an offset of 4, written as a dword) is (num_queues << 3) - 1.
+     */
+    if (unlikely(!nvme_addr_is_mappable(n, dbs_addr,
+                                        (size_t)n->num_queues << 3, true)) ||
+        unlikely(!nvme_addr_is_mappable(n, eis_addr,
+                                        (size_t)n->num_queues << 3, true))) {
+        trace_pci_nvme_err_dbbuf_addr(dbs_addr, eis_addr);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
