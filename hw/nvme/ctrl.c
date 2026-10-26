@@ -671,6 +671,8 @@ static void nvme_irq_check(NvmeCtrl *n)
     PCIDevice *pci = PCI_DEVICE(n);
     uint32_t intms = ldl_le_p(&n->bar.intms);
 
+    trace_pci_nvme_irq_check(intms, n->irq_status);
+
     if (msix_enabled(pci)) {
         return;
     }
@@ -681,8 +683,10 @@ static void nvme_irq_check(NvmeCtrl *n)
     }
 
     if (~intms & n->irq_status) {
+        trace_pci_nvme_irq_pin(1);
         pci_irq_assert(pci);
     } else {
+        trace_pci_nvme_irq_pin(0);
         pci_irq_deassert(pci);
     }
 }
@@ -696,7 +700,6 @@ static void nvme_irq_assert(NvmeCtrl *n, NvmeCQueue *cq)
             trace_pci_nvme_irq_msix(cq->vector);
             msix_notify(pci, cq->vector);
         } else {
-            trace_pci_nvme_irq_pin();
             assert(cq->vector < 32);
             n->irq_status |= 1 << cq->vector;
             nvme_irq_check(n);
