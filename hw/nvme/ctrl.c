@@ -656,6 +656,16 @@ static uint8_t nvme_sq_empty(NvmeSQueue *sq)
     return sq->head == sq->tail;
 }
 
+static inline bool nvme_cq_empty(NvmeCQueue *cq)
+{
+    return cq->head == cq->tail;
+}
+
+static inline bool nvme_sq_full(NvmeSQueue *sq)
+{
+    return (sq->tail + 1) % sq->size == sq->head;
+}
+
 static void nvme_irq_check(NvmeCtrl *n)
 {
     PCIDevice *pci = PCI_DEVICE(n);
@@ -8541,6 +8551,16 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
     return ldn_le_p(ptr + addr, size);
 }
 
+static inline bool nvme_cq_head_ok(NvmeCQueue *cq, uint16_t head)
+{
+    return head < cq->size && head != cq->head && !nvme_cq_empty(cq);
+}
+
+static inline bool nvme_sq_tail_ok(NvmeSQueue *sq, uint16_t tail)
+{
+    return tail < sq->size && tail != sq->tail && !nvme_sq_full(sq);
+}
+
 static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
 {
     PCIDevice *pci = PCI_DEVICE(n);
@@ -8589,12 +8609,11 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
         }
 
         cq = n->cq[qid];
-        if (unlikely(new_head >= cq->size)) {
+        if (unlikely(!nvme_cq_head_ok(cq, new_head))) {
             NVME_GUEST_ERR(pci_nvme_ub_db_wr_invalid_cqhead,
-                           "completion queue doorbell write value"
-                           " beyond queue size, sqid=%"PRIu32","
-                           " new_head=%"PRIu16", ignoring",
-                           qid, new_head);
+                           "invalid completion queue doorbell write value"
+                           " (cqid %"PRIu32" old %"PRIu16" new %"PRIu16")",
+                           qid, cq->head, new_head);
 
             if (n->outstanding_aers) {
                 nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
@@ -8647,12 +8666,26 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
         }
 
         sq = n->sq[qid];
-        if (unlikely(new_tail >= sq->size)) {
+        if (qid && n->dbbuf_enabled) {
+            /*
+             * With the shadow doorbell buffer in use, the authoritative
+             * tail lives in the shadow buffer and the doorbell write
+             * value cannot be trusted to be the tail (drivers are only
+             * required to update the shadow; the "real" doorbell is a
+             * kick). Treat this as a kick and let the processing loop
+             * re-read the tail from the shadow buffer.
+             */
+            trace_pci_nvme_mmio_doorbell_sq(sq->sqid, new_tail);
+
+            qemu_bh_schedule(sq->bh);
+            return;
+        }
+
+        if (unlikely(!nvme_sq_tail_ok(sq, new_tail))) {
             NVME_GUEST_ERR(pci_nvme_ub_db_wr_invalid_sqtail,
-                           "submission queue doorbell write value"
-                           " beyond queue size, sqid=%"PRIu32","
-                           " new_tail=%"PRIu16", ignoring",
-                           qid, new_tail);
+                           "invalid submission queue doorbell write value"
+                           " (sqid %"PRIu32" old %"PRIu16" new %"PRIu16")",
+                           qid, sq->tail, new_tail);
 
             if (n->outstanding_aers) {
                 nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
