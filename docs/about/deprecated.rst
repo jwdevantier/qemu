@@ -354,6 +354,11 @@ from Intel that was not properly allocated. Since version 5.2, the controller
 has used a properly allocated identifier. Deprecate the ``use-intel-id``
 machine compatibility parameter.
 
+``-device nvme,ioeventfd=on|off`` (since 11.0)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The ``nvme`` device always enables ioeventfd if possible.
+
 ``-device cxl-type3,memdev=xxxx`` (since 8.0)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

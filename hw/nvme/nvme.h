@@ -522,7 +522,6 @@ typedef struct NvmeSQueue {
     uint64_t    ei_addr;
     QEMUBH      *bh;
     EventNotifier notifier;
-    bool        ioeventfd_enabled;
     NvmeRequest *io_req;
     QTAILQ_HEAD(, NvmeRequest) req_list;
     QTAILQ_HEAD(, NvmeRequest) out_req_list;
@@ -542,7 +541,6 @@ typedef struct NvmeCQueue {
     uint64_t    ei_addr;
     QEMUBH      *bh;
     EventNotifier notifier;
-    bool        ioeventfd_enabled;
     QTAILQ_HEAD(, NvmeSQueue) sq_list;
     QTAILQ_HEAD(, NvmeRequest) req_list;
 } NvmeCQueue;
@@ -568,6 +566,11 @@ typedef struct NvmeParams {
     uint8_t  zasl;
     bool     auto_transition_zones;
     bool     legacy_cmb;
+    /*
+     * Deprecated: the io queue doorbell ioeventfd wiring is always
+     * attempted when a doorbell buffer is configured. Kept for
+     * command line compatibility; ignored.
+     */
     bool     ioeventfd;
     bool     dbcs;
     uint16_t  sriov_max_vfs;
