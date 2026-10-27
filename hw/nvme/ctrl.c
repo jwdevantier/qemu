@@ -733,6 +733,29 @@ static inline bool nvme_msix_enabled(NvmeCtrl *n)
     return msix_enabled(PCI_DEVICE(n));
 }
 
+/*
+ * The host advanced the CQ head (via a real doorbell write or through
+ * the shadow doorbell buffer ioeventfd): process the new head, i.e.
+ * account for the consumed completions and re-evaluate the irq state
+ * if the queue was drained, and schedule deferred completion posting.
+ */
+static void nvme_cq_kick(NvmeCQueue *cq)
+{
+    NvmeCtrl *n = cq->ctrl;
+
+    qemu_bh_schedule(cq->bh);
+
+    if (nvme_cq_empty(cq) && cq->vector != -1 && !nvme_msix_enabled(n)) {
+        /*
+         * nvme_cq_kick is only called when the head changes so it is safe to
+         * decrement intx.pending unconditionally.
+         */
+        n->irq.intx.pending--;
+
+        nvme_irq_check_intx(n);
+    }
+}
+
 static void nvme_req_clear(NvmeRequest *req)
 {
     req->ns = NULL;
@@ -4797,7 +4820,6 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeRequest *req)
 static void nvme_cq_notifier(EventNotifier *e)
 {
     NvmeCQueue *cq = container_of(e, NvmeCQueue, notifier);
-    NvmeCtrl *n = cq->ctrl;
 
     if (!event_notifier_test_and_clear(e)) {
         return;
@@ -4805,15 +4827,7 @@ static void nvme_cq_notifier(EventNotifier *e)
 
     nvme_update_cq_head(cq);
 
-    if (cq->tail == cq->head) {
-        if (cq->vector != -1 && !nvme_msix_enabled(n)) {
-            n->irq.intx.pending--;
-
-            nvme_irq_check_intx(n);
-        }
-    }
-
-    qemu_bh_schedule(cq->bh);
+    nvme_cq_kick(cq);
 }
 
 static int nvme_init_cq_ioeventfd(NvmeCQueue *cq)
@@ -8692,13 +8706,7 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
             stl_le_pci_dma(pci, cq->db_addr, cq->head, MEMTXATTRS_UNSPECIFIED);
         }
 
-        if (cq->tail == cq->head) {
-            if (cq->vector != -1 && !nvme_msix_enabled(n)) {
-                n->irq.intx.pending--;
-
-                nvme_irq_check_intx(n);
-            }
-        }
+        nvme_cq_kick(cq);
     } else {
         /* Submission queue doorbell write */
 
