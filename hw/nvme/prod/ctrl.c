@@ -1253,7 +1253,7 @@ static void vnvme_init_ctrl(VnvmeCtrl *n)
     id->fna = 0;
     id->oncs = cpu_to_le16(NVME_ONCS_WRITE_ZEROES | NVME_ONCS_DSM);
     id->vwc = NVME_VWC_NSID_BROADCAST_SUPPORT | NVME_VWC_PRESENT;
-    id->cntrltype = 0;
+    id->cntrltype = 0x1; // I/O controller
 
     strpadcpy((char *)id->sn, sizeof(id->sn),
               (n->params.serial && n->params.serial[0]) ? n->params.serial
