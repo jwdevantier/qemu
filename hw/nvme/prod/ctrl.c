@@ -454,15 +454,21 @@ static uint16_t vnvme_identify_ns(VnvmeCtrl *n, NvmeRequest *req)
 {
     NvmeIdentify *c = (NvmeIdentify *)&req->cmd;
     uint32_t nsid = le32_to_cpu(c->nsid);
+    uint32_t nn = le32_to_cpu(n->id_ctrl.nn);
     NvmeNamespaceBase *ns;
 
-    if (!nsid || nsid == NVME_NSID_BROADCAST) {
+    /* ctrl does not support the NS management capability.
+     * so checking separately for 0xFFFFFFFF is not necessary */
+    if (!nsid || nsid > nn) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
     ns = nvme_ns(n, nsid);
-    if (!ns) {
-        return NVME_INVALID_FIELD | NVME_DNR;
+    if (unlikely(!ns)) {
+        /* invalid NS */
+        g_autofree NvmeIdNs *id_ns = g_malloc0(sizeof(NvmeIdNs));
+        return nvme_c2h(n, (uint8_t *)id_ns, sizeof(*id_ns),
+                        NVME_IDENTIFY_DATA_SIZE, req);
     }
 
     trace_pci_nvme_identify_ns(nsid);
