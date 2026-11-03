@@ -1214,6 +1214,7 @@ static void vnvme_init_ctrl(VnvmeCtrl *n)
 
     id->vid = cpu_to_le16(VNVME_VID);
     id->ssvid = cpu_to_le16(VNVME_SVID);
+    id->ver = cpu_to_le32(NVME_SPEC_VER);
     id->ieee[0] = VNVME_IEEE_OUI0;
     id->ieee[1] = VNVME_IEEE_OUI1;
     id->ieee[2] = VNVME_IEEE_OUI2;
