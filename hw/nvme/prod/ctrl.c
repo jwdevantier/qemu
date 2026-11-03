@@ -62,6 +62,9 @@
 #define VNVME_MN            "QEMU NVMe Prod Controller"
 #define VNVME_FR            "RFC00001"
 
+#define VNVME_FRMW_NUM_SLOTS  1
+#define VNVME_FRMW_SLOT1_RO 1
+
 #define VNVME_TEMPERATURE           0x143
 #define VNVME_TEMPERATURE_WARNING   0x157
 
@@ -1234,7 +1237,7 @@ static void vnvme_init_ctrl(VnvmeCtrl *n)
     id->oacs = NVME_OACS_DBCS;
     id->acl = 3;
     id->aerl = n->params.aerl;
-    id->frmw = (1 << 7) | 0;
+    id->frmw = (VNVME_FRMW_NUM_SLOTS << 1) | VNVME_FRMW_SLOT1_RO;
     id->lpa = 0;
     id->elpe = 0;
     id->npss = 0;
