@@ -684,6 +684,11 @@ static uint16_t vnvme_smart_info(VnvmeCtrl *n, uint32_t len, uint64_t off,
                                   NvmeRequest *req)
 {
     NvmeSmartLog smart = {};
+
+    if (off >= sizeof(smart)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
     uint32_t buf_len = sizeof(smart) - off;
 
     smart.critical_warning = n->smart_critical_warning;
@@ -714,6 +719,11 @@ static uint16_t vnvme_error_info(VnvmeCtrl *n, uint32_t len, uint64_t off,
                                   NvmeRequest *req)
 {
     NvmeErrorLog err = {};
+
+    if (off >= sizeof(err)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
     uint32_t buf_len = sizeof(err) - off;
 
     uint32_t trans_len = MIN(buf_len, len);
@@ -725,6 +735,11 @@ static uint16_t vnvme_fw_log_info(VnvmeCtrl *n, uint32_t len, uint64_t off,
                                    NvmeRequest *req)
 {
     NvmeFwSlotInfoLog fw_log = { .afi = 0x1 };
+
+    if (off >= sizeof(fw_log)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
     uint32_t buf_len = sizeof(fw_log) - off;
 
     strpadcpy((char *)fw_log.frs1, sizeof(fw_log.frs1), "1.0", ' ');
