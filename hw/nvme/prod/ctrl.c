@@ -1246,11 +1246,11 @@ static void vnvme_init_ctrl(VnvmeCtrl *n)
     id->vwc = NVME_VWC_NSID_BROADCAST_SUPPORT | NVME_VWC_PRESENT;
     id->cntrltype = 0;
 
-    pstrcpy((char *)id->sn, sizeof(id->sn),
-            (n->params.serial && n->params.serial[0]) ? n->params.serial
-                                                        : VNVME_SN);
-    pstrcpy((char *)id->mn, sizeof(id->mn), VNVME_MN);
-    pstrcpy((char *)id->fr, sizeof(id->fr), VNVME_FR);
+    strpadcpy((char *)id->sn, sizeof(id->sn),
+              (n->params.serial && n->params.serial[0]) ? n->params.serial
+                                                        : VNVME_SN, ' ');
+    strpadcpy((char *)id->mn, sizeof(id->mn), VNVME_MN, ' ');
+    strpadcpy((char *)id->fr, sizeof(id->fr), VNVME_FR, ' ');
 
     snprintf((char *)id->subnqn, sizeof(id->subnqn),
              "nqn.2019-08.org.qemu:%s",
