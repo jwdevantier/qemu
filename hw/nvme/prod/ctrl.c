@@ -594,10 +594,14 @@ static uint16_t vnvme_get_feature(VnvmeCtrl *n, NvmeRequest *req)
 
     switch (fid) {
     case NVME_TEMPERATURE_THRESHOLD:
-        result = 0;
-        if (NVME_TEMP_TMPSEL(dw11) == NVME_TEMP_TMPSEL_COMPOSITE &&
-            NVME_TEMP_THSEL(dw11) == NVME_TEMP_THSEL_OVER) {
-            result = VNVME_TEMPERATURE_WARNING;
+        if (NVME_TEMP_TMPSEL(dw11) == NVME_TEMP_TMPSEL_COMPOSITE) {
+            if (NVME_TEMP_THSEL(dw11) == NVME_TEMP_THSEL_OVER) {
+                result = n->features.temp_thresh_hi;
+            } else if (NVME_TEMP_THSEL(dw11) == NVME_TEMP_THSEL_UNDER) {
+                result = n->features.temp_thresh_low;
+            } else {
+                return NVME_INVALID_FIELD | NVME_DNR;
+            }
         }
         break;
     case NVME_NUMBER_OF_QUEUES:
@@ -611,6 +615,9 @@ static uint16_t vnvme_get_feature(VnvmeCtrl *n, NvmeRequest *req)
         break;
     case NVME_ARBITRATION:
         result = NVME_ARB_AB_NOLIMIT;
+        break;
+    case NVME_ASYNCHRONOUS_EVENT_CONF:
+        result = n->features.async_config;
         break;
     default:
         result = 0;
