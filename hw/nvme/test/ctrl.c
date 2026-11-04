@@ -741,7 +741,7 @@ static void nvme_process_aers(NvmeCtrlBase *bn)
     NvmeCtrl *n = nvme_ctrl_of(bn);
     NvmeAsyncEvent *event, *next;
 
-    trace_pci_nvme_process_aers(n->aer_queued);
+    trace_pci_nvme_process_aers(n->base.aer_queued);
 
     QTAILQ_FOREACH_SAFE(event, &n->base.aer_queue, entry, next) {
         NvmeRequest *req;
@@ -754,15 +754,15 @@ static void nvme_process_aers(NvmeCtrlBase *bn)
         }
 
         /* ignore if masked (cqe posted, but event not cleared) */
-        if (n->aer_mask & (1 << event->result.event_type)) {
-            trace_pci_nvme_aer_masked(event->result.event_type, n->aer_mask);
+        if (n->base.aer_mask & (1 << event->result.event_type)) {
+            trace_pci_nvme_aer_masked(event->result.event_type, n->base.aer_mask);
             continue;
         }
 
         QTAILQ_REMOVE(&n->base.aer_queue, event, entry);
-        n->aer_queued--;
+        n->base.aer_queued--;
 
-        n->aer_mask |= 1 << event->result.event_type;
+        n->base.aer_mask |= 1 << event->result.event_type;
         n->base.outstanding_aers--;
 
         req = n->base.aer_reqs[n->base.outstanding_aers];
@@ -787,8 +787,8 @@ static void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
 
     trace_pci_nvme_enqueue_event(event_type, event_info, log_page);
 
-    if (n->aer_queued == n->params.aer_max_queued) {
-        trace_pci_nvme_enqueue_event_noqueue(n->aer_queued);
+    if (n->base.aer_queued == n->params.aer_max_queued) {
+        trace_pci_nvme_enqueue_event_noqueue(n->base.aer_queued);
         return;
     }
 
@@ -800,7 +800,7 @@ static void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
     };
 
     QTAILQ_INSERT_TAIL(&n->base.aer_queue, event, entry);
-    n->aer_queued++;
+    n->base.aer_queued++;
 
     nvme_process_aers(&n->base);
 }
@@ -838,12 +838,12 @@ static void nvme_clear_events(NvmeCtrl *n, uint8_t event_type)
 {
     NvmeAsyncEvent *event, *next;
 
-    n->aer_mask &= ~(1 << event_type);
+    n->base.aer_mask &= ~(1 << event_type);
 
     QTAILQ_FOREACH_SAFE(event, &n->base.aer_queue, entry, next) {
         if (event->result.event_type == event_type) {
             QTAILQ_REMOVE(&n->base.aer_queue, event, entry);
-            n->aer_queued--;
+            n->base.aer_queued--;
             g_free(event);
         }
     }
@@ -6677,8 +6677,8 @@ static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst)
         }
     }
 
-    n->aer_queued = 0;
-    n->aer_mask = 0;
+    n->base.aer_queued = 0;
+    n->base.aer_mask = 0;
     n->base.outstanding_aers = 0;
     n->base.qs_created = false;
 
@@ -8870,7 +8870,7 @@ static bool nvme_ctrl_pre_save(void *opaque, Error **errp)
      * QEMU NVMe changes, we may break migration without noticing it, or worse,
      * introduce silent data corruption during migration.
      */
-    if (n->aer_queued) {
+    if (n->base.aer_queued) {
         NvmeAsyncEvent *event;
 
         QTAILQ_FOREACH(event, &n->base.aer_queue, entry) {
@@ -9072,7 +9072,7 @@ static bool nvme_ctrl_post_load(void *opaque, int version_id, Error **errp)
         qemu_bh_schedule(cq->bh);
     }
 
-    if (n->aer_queued) {
+    if (n->base.aer_queued) {
         NvmeAsyncEvent *event;
 
         QTAILQ_FOREACH(event, &n->base.aer_queue, entry) {
@@ -9180,13 +9180,13 @@ static const VMStateDescription nvme_vmstate = {
         VMSTATE_UINT64(base.dbbuf_eis, NvmeCtrl),
         VMSTATE_BOOL(base.dbbuf_enabled, NvmeCtrl),
 
-        VMSTATE_UINT8(aer_mask, NvmeCtrl),
+        VMSTATE_UINT8(base.aer_mask, NvmeCtrl),
         VMSTATE_VARRAY_OF_POINTER_TO_STRUCT_UINT8_ALLOC(
             base.aer_reqs, NvmeCtrl, base.outstanding_aers, 0,
             nvme_vmstate_request, NvmeRequest),
         VMSTATE_QTAILQ_V(base.aer_queue, NvmeCtrl, 1, nvme_vmstate_async_event,
                          NvmeAsyncEvent, entry),
-        VMSTATE_INT32(aer_queued, NvmeCtrl),
+        VMSTATE_INT32(base.aer_queued, NvmeCtrl),
 
         VMSTATE_STRUCT(namespace, NvmeCtrl, 0, nvme_vmstate_ns, NvmeNamespace),
 

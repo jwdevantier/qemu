@@ -311,7 +311,10 @@ typedef struct NvmeCtrlBase {
     uint16_t    page_bits;
     uint16_t    max_prp_ents;
     uint32_t    max_q_ents;
+    /* Shared AER queue state; queue and event policy are per device. */
     uint8_t     outstanding_aers;
+    int         aer_queued;
+    uint8_t     aer_mask;
     uint64_t    starttime_ms;
     uint16_t    temperature;
     uint8_t     smart_critical_warning;

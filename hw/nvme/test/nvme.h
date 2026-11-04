@@ -464,9 +464,6 @@ typedef struct NvmeCtrl {
         hwaddr            cba;
     } pmr;
 
-    uint8_t     aer_mask;
-    int         aer_queued;
-
     /* Namespace ID is started with 1 so bitmap should be 1-based */
 #define NVME_CHANGED_NSID_SIZE  (NVME_MAX_NAMESPACES + 1)
     DECLARE_BITMAP(changed_nsids, NVME_CHANGED_NSID_SIZE);
