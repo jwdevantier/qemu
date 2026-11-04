@@ -901,6 +901,15 @@ static void vnvme_process_db(VnvmeCtrl *n, hwaddr offset, uint32_t val)
 
 /* --- Controller start / stop --- */
 
+static void vnvme_reset_features(VnvmeCtrl *n)
+{
+    n->features.temp_thresh_hi = VNVME_TEMPERATURE_WARNING;
+    n->features.temp_thresh_low = 0;
+    n->features.async_config = 0;
+    n->smart_critical_warning = 0;
+    n->dn = 0;
+}
+
 static int vnvme_start_ctrl(VnvmeCtrl *n)
 {
     uint32_t cc = le32_to_cpu(n->bar.cc);
@@ -929,7 +938,6 @@ static int vnvme_start_ctrl(VnvmeCtrl *n)
 
     n->starttime_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
     n->temperature = VNVME_TEMPERATURE;
-    n->features.temp_thresh_hi = VNVME_TEMPERATURE_WARNING;
 
     if (msix_enabled(PCI_DEVICE(n)) && accel_msi_via_irqfd_enabled()) {
         msix_set_vector_notifiers(PCI_DEVICE(n), nvme_irqchip_vector_unmask,
@@ -986,6 +994,7 @@ static void vnvme_disable_ctrl(VnvmeCtrl *n)
     n->admin_sq.size = n->admin_cq.size = 0;
     n->qs_created = false;
     n->outstanding_aers = 0;
+    vnvme_reset_features(n);
     n->sq[0] = NULL;
     n->cq[0] = NULL;
 }
@@ -1324,6 +1333,7 @@ static void vnvme_init_state(VnvmeCtrl *n)
     n->sq = g_new0(NvmeSQueue *, n->num_queues);
     n->cq = g_new0(NvmeCQueue *, n->num_queues);
     n->temperature = VNVME_TEMPERATURE;
+    vnvme_reset_features(n);
     n->starttime_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
     n->aer_reqs = g_new0(NvmeRequest *, n->params.aerl + 1);
     QTAILQ_INIT(&n->aer_queue);
