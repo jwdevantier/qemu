@@ -68,6 +68,9 @@
 #define VNVME_TEMPERATURE           0x143
 #define VNVME_TEMPERATURE_WARNING   0x157
 
+#define VNVME_SHN_NORMAL            0x1
+#define VNVME_SHN_ABRUPT            0x2
+
 /*
  * Asynchronous Event Request Limit. Fixed, not a property: vnvme never
  * queues asynchronous events (NvmeBaseClass.process_aers stays NULL),
@@ -901,6 +904,40 @@ static void vnvme_process_db(VnvmeCtrl *n, hwaddr offset, uint32_t val)
 
 /* --- Controller start / stop --- */
 
+static void vnvme_shutdown(VnvmeCtrl *n, uint8_t shn)
+{
+    uint32_t csts;
+    int ret = 0;
+
+    if (shn != VNVME_SHN_NORMAL && shn != VNVME_SHN_ABRUPT) {
+        return;
+    }
+
+    /* Nvme Base 1.4c, Fig 79:
+     * 01b while shutdown processing is occurring.
+     */
+    csts = le32_to_cpu(n->bar.csts);
+    csts &= ~(CSTS_SHST_MASK << CSTS_SHST_SHIFT);
+    csts |= NVME_CSTS_SHST_PROGRESS;
+    stl_le_p(&n->bar.csts, csts);
+
+    /* it should be safe to power off the controller after a
+     * normal shutdown sets CSTS.SHST to 10b.
+     * Hence, flush data, then set CSTS.SHST
+     */
+    if (shn == VNVME_SHN_NORMAL && n->namespace.blkconf.blk) {
+        ret = blk_flush(n->namespace.blkconf.blk);
+    }
+
+    csts = le32_to_cpu(n->bar.csts);
+    csts &= ~(CSTS_SHST_MASK << CSTS_SHST_SHIFT);
+    csts |= NVME_CSTS_SHST_COMPLETE;
+    if (ret < 0) {
+        csts |= NVME_CSTS_FAILED;
+    }
+    stl_le_p(&n->bar.csts, csts);
+}
+
 static void vnvme_reset_features(VnvmeCtrl *n)
 {
     n->features.temp_thresh_hi = VNVME_TEMPERATURE_WARNING;
@@ -1044,10 +1081,19 @@ static void vnvme_mmio_write_reg(VnvmeCtrl *n, hwaddr offset, uint64_t val,
         uint32_t new_cc = val;
         bool was_en = NVME_CC_EN(old_cc);
         bool now_en = NVME_CC_EN(new_cc);
+        uint8_t old_shn = NVME_CC_SHN(old_cc);
+        uint8_t new_shn = NVME_CC_SHN(new_cc);
 
         n->bar.cc = cpu_to_le32(new_cc);
 
         trace_pci_nvme_mmio_cfg(new_cc);
+
+        /* Interpreting NVMe Base 1.4c, Fig 78 definitions of EN and SHN
+         * to mean that reset takes precedence.
+         */
+        if (was_en && now_en && old_shn == 0 && new_shn != 0) {
+            vnvme_shutdown(n, new_shn);
+        }
 
         if (!was_en && now_en) {
             if (vnvme_start_ctrl(n) < 0) {
