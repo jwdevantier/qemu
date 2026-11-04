@@ -358,7 +358,7 @@ uint16_t nvme_del_cq(NvmeCtrlBase *n, NvmeRequest *req)
 
     if (unlikely(!qid || nvme_check_cqid(n, qid))) {
         trace_pci_nvme_err_invalid_del_cq_cqid(qid);
-        return NVME_INVALID_CQID | NVME_DNR;
+        return NVME_INVALID_QID | NVME_DNR;
     }
 
     cq = n->cq[qid];
