@@ -45,14 +45,14 @@ uint16_t nvme_abort(NvmeCtrlBase *n, NvmeRequest *req)
     sq = n->sq[sqid];
 
     if (sqid == 0) {
-        for (i = 0; i < n->outstanding_aers; i++) {
-            NvmeRequest *areq = n->aer_reqs[i];
+        for (i = 0; i < n->aer.outstanding; i++) {
+            NvmeRequest *areq = n->aer.reqs[i];
 
             if (nvme_cid(areq) == cid) {
-                memmove(n->aer_reqs + i, n->aer_reqs + i + 1,
-                        (n->outstanding_aers - i - 1) *
+                memmove(n->aer.reqs + i, n->aer.reqs + i + 1,
+                        (n->aer.outstanding - i - 1) *
                         sizeof(NvmeRequest *));
-                n->outstanding_aers--;
+                n->aer.outstanding--;
 
                 areq->status = NVME_CMD_ABORT_REQ;
                 req->cqe.result = cpu_to_le32(0);
@@ -84,20 +84,18 @@ uint16_t nvme_abort(NvmeCtrlBase *n, NvmeRequest *req)
  */
 uint16_t nvme_aer(NvmeCtrlBase *n, NvmeRequest *req)
 {
-    NvmeBaseClass *bc = NVME_BASE_GET_CLASS(n);
-
     trace_pci_nvme_aer(nvme_cid(req));
 
-    if (n->outstanding_aers > n->params.aerl) {
+    if (n->aer.outstanding > n->params.aerl) {
         trace_pci_nvme_aer_aerl_exceeded();
         return NVME_AER_LIMIT_EXCEEDED | NVME_DNR;
     }
 
-    n->aer_reqs[n->outstanding_aers] = req;
-    n->outstanding_aers++;
+    n->aer.reqs[n->aer.outstanding] = req;
+    n->aer.outstanding++;
 
-    if (!QTAILQ_EMPTY(&n->aer_queue) && bc->process_aers) {
-        bc->process_aers(n);
+    if (!QTAILQ_EMPTY(&n->aer.queue)) {
+        nvme_aer_process(n);
     }
 
     return NVME_NO_COMPLETE;

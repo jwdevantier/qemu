@@ -311,18 +311,19 @@ typedef struct NvmeCtrlBase {
     uint16_t    page_bits;
     uint16_t    max_prp_ents;
     uint32_t    max_q_ents;
-    /* Shared AER queue state; queue and event policy are per device. */
-    uint8_t     outstanding_aers;
-    int         aer_queued;
-    uint8_t     aer_mask;
+    struct {
+        uint8_t outstanding;
+        int queued;
+        int queued_max;
+        uint8_t mask;
+        NvmeRequest **reqs;
+        QTAILQ_HEAD(, NvmeAsyncEvent) queue;
+    } aer;
     uint64_t    starttime_ms;
     uint16_t    temperature;
     uint8_t     smart_critical_warning;
     uint32_t    conf_msix_qsize;
     uint32_t    conf_ioqpairs;
-
-    NvmeRequest **aer_reqs;
-    QTAILQ_HEAD(, NvmeAsyncEvent) aer_queue;
 
     uint32_t    dmrsl;
 
@@ -420,11 +421,6 @@ typedef struct NvmeCtrlBase {
  * commands, or overrides admin_cmd entirely (the test device wraps
  * the generic dispatcher with its command-effects gate and its
  * extended command set).
- *
- * 'process_aers' is called by the core default AER handler when
- * asynchronous events are queued; the test device installs its
- * event dispatcher, the production device never queues events and
- * leaves it NULL.
  */
 typedef struct NvmeBaseClass {
     PCIDeviceClass parent_class;
@@ -433,7 +429,6 @@ typedef struct NvmeBaseClass {
     uint16_t (*admin_cmd)(NvmeCtrlBase *n, NvmeRequest *req);
     uint16_t (*admin_cmd_custom)(NvmeCtrlBase *n, NvmeRequest *req);
     bool (*sq_admit)(NvmeSQueue *sq, NvmeRequest *req);
-    void (*process_aers)(NvmeCtrlBase *n);
 
     bool bounce;
 } NvmeBaseClass;
@@ -655,5 +650,14 @@ uint16_t nvme_admin_cmd_custom(NvmeCtrlBase *n, NvmeRequest *req);
  */
 uint16_t nvme_abort(NvmeCtrlBase *n, NvmeRequest *req);
 uint16_t nvme_aer(NvmeCtrlBase *n, NvmeRequest *req);
+
+/*
+ * Asynchronous Event Request
+ */
+void nvme_aer_free_events(NvmeCtrlBase *n);
+void nvme_aer_process(NvmeCtrlBase *n);
+void nvme_aer_enqueue(NvmeCtrlBase *n, uint8_t event_type,
+                      uint8_t event_info, uint8_t log_page);
+void nvme_aer_clear_event(NvmeCtrlBase *n, uint8_t event_type);
 
 #endif /* HW_NVME_NVME_H */

@@ -732,79 +732,6 @@ uint16_t nvme_bounce_mdata(NvmeCtrlBase *n, void *ptr, uint32_t len,
     return nvme_tx(&req->iov, ptr, len, dir);
 }
 
-/*
- * NvmeBaseClass.process_aers hook (see core/queue.c): dispatch
- * queued asynchronous events to outstanding AER commands.
- */
-static void nvme_process_aers(NvmeCtrlBase *bn)
-{
-    NvmeCtrl *n = nvme_ctrl_of(bn);
-    NvmeAsyncEvent *event, *next;
-
-    trace_pci_nvme_process_aers(n->base.aer_queued);
-
-    QTAILQ_FOREACH_SAFE(event, &n->base.aer_queue, entry, next) {
-        NvmeRequest *req;
-        NvmeAerResult *result;
-
-        /* can't post cqe if there is nothing to complete */
-        if (!n->base.outstanding_aers) {
-            trace_pci_nvme_no_outstanding_aers();
-            break;
-        }
-
-        /* ignore if masked (cqe posted, but event not cleared) */
-        if (n->base.aer_mask & (1 << event->result.event_type)) {
-            trace_pci_nvme_aer_masked(event->result.event_type, n->base.aer_mask);
-            continue;
-        }
-
-        QTAILQ_REMOVE(&n->base.aer_queue, event, entry);
-        n->base.aer_queued--;
-
-        n->base.aer_mask |= 1 << event->result.event_type;
-        n->base.outstanding_aers--;
-
-        req = n->base.aer_reqs[n->base.outstanding_aers];
-
-        result = (NvmeAerResult *) &req->cqe.result;
-        result->event_type = event->result.event_type;
-        result->event_info = event->result.event_info;
-        result->log_page = event->result.log_page;
-        g_free(event);
-
-        trace_pci_nvme_aer_post_cqe(result->event_type, result->event_info,
-                                    result->log_page);
-
-        nvme_enqueue_req_completion(&n->base.admin_cq, req);
-    }
-}
-
-static void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
-                               uint8_t event_info, uint8_t log_page)
-{
-    NvmeAsyncEvent *event;
-
-    trace_pci_nvme_enqueue_event(event_type, event_info, log_page);
-
-    if (n->base.aer_queued == n->params.aer_max_queued) {
-        trace_pci_nvme_enqueue_event_noqueue(n->base.aer_queued);
-        return;
-    }
-
-    event = g_new(NvmeAsyncEvent, 1);
-    event->result = (NvmeAerResult) {
-        .event_type = event_type,
-        .event_info = event_info,
-        .log_page   = log_page,
-    };
-
-    QTAILQ_INSERT_TAIL(&n->base.aer_queue, event, entry);
-    n->base.aer_queued++;
-
-    nvme_process_aers(&n->base);
-}
-
 static void nvme_smart_event(NvmeCtrl *n, uint8_t event)
 {
     uint8_t aer_info;
@@ -831,22 +758,8 @@ static void nvme_smart_event(NvmeCtrl *n, uint8_t event)
         return;
     }
 
-    nvme_enqueue_event(n, NVME_AER_TYPE_SMART, aer_info, NVME_LOG_SMART_INFO);
-}
-
-static void nvme_clear_events(NvmeCtrl *n, uint8_t event_type)
-{
-    NvmeAsyncEvent *event, *next;
-
-    n->base.aer_mask &= ~(1 << event_type);
-
-    QTAILQ_FOREACH_SAFE(event, &n->base.aer_queue, entry, next) {
-        if (event->result.event_type == event_type) {
-            QTAILQ_REMOVE(&n->base.aer_queue, event, entry);
-            n->base.aer_queued--;
-            g_free(event);
-        }
-    }
+    nvme_aer_enqueue(&n->base, NVME_AER_TYPE_SMART, aer_info,
+                     NVME_LOG_SMART_INFO);
 }
 
 static inline uint16_t nvme_check_mdts(NvmeCtrl *n, size_t len)
@@ -3992,7 +3905,7 @@ static uint16_t nvme_ocp_extended_smart_info(NvmeCtrl *n, uint8_t rae,
     memcpy(smart_l.log_page_guid, guid, sizeof(smart_l.log_page_guid));
 
     if (!rae) {
-        nvme_clear_events(n, NVME_AER_TYPE_SMART);
+        nvme_aer_clear_event(&n->base, NVME_AER_TYPE_SMART);
     }
 
     trans_len = MIN(sizeof(smart_l) - off, buf_len);
@@ -4055,7 +3968,7 @@ static uint16_t nvme_smart_info(NvmeCtrl *n, uint8_t rae, uint32_t buf_len,
         cpu_to_le64((((current_ms - n->base.starttime_ms) / 1000) / 60) / 60);
 
     if (!rae) {
-        nvme_clear_events(n, NVME_AER_TYPE_SMART);
+        nvme_aer_clear_event(&n->base, NVME_AER_TYPE_SMART);
     }
 
     return nvme_c2h(&n->base, (uint8_t *) &smart + off, trans_len, buf_len, req);
@@ -4133,7 +4046,7 @@ static uint16_t nvme_error_info(NvmeCtrl *n, uint8_t rae, uint32_t buf_len,
     }
 
     if (!rae) {
-        nvme_clear_events(n, NVME_AER_TYPE_ERROR);
+        nvme_aer_clear_event(&n->base, NVME_AER_TYPE_ERROR);
     }
 
     memset(&errlog, 0x0, sizeof(errlog));
@@ -4182,7 +4095,7 @@ static uint16_t nvme_changed_nslist(NvmeCtrl *n, uint8_t rae, uint32_t buf_len,
     }
 
     if (!rae) {
-        nvme_clear_events(n, NVME_AER_TYPE_NOTICE);
+        nvme_aer_clear_event(&n->base, NVME_AER_TYPE_NOTICE);
     }
 
     return nvme_c2h(&n->base, ((uint8_t *)nslist) + off, trans_len, buf_len, req);
@@ -5749,9 +5662,9 @@ static uint16_t nvme_ns_attachment(NvmeCtrl *n, NvmeRequest *req)
          * via Get Log Page command.
          */
         if (!test_and_set_bit(nsid, ctrl->changed_nsids)) {
-            nvme_enqueue_event(ctrl, NVME_AER_TYPE_NOTICE,
-                               NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED,
-                               NVME_LOG_CHANGED_NSLIST);
+            nvme_aer_enqueue(&ctrl->base, NVME_AER_TYPE_NOTICE,
+                             NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED,
+                             NVME_LOG_CHANGED_NSLIST);
         }
     }
 
@@ -5761,9 +5674,9 @@ static uint16_t nvme_ns_attachment(NvmeCtrl *n, NvmeRequest *req)
 void nvme_ctrl_notify_ns_resize(NvmeCtrl *ctrl, NvmeNamespace *ns)
 {
     if (!test_and_set_bit(ns->params.nsid, ctrl->changed_nsids)) {
-        nvme_enqueue_event(ctrl, NVME_AER_TYPE_NOTICE,
-                           NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED,
-                           NVME_LOG_CHANGED_NSLIST);
+        nvme_aer_enqueue(&ctrl->base, NVME_AER_TYPE_NOTICE,
+                         NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED,
+                         NVME_LOG_CHANGED_NSLIST);
     }
 }
 
@@ -6658,11 +6571,8 @@ static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst)
         }
     }
 
-    while (!QTAILQ_EMPTY(&n->base.aer_queue)) {
-        NvmeAsyncEvent *event = QTAILQ_FIRST(&n->base.aer_queue);
-        QTAILQ_REMOVE(&n->base.aer_queue, event, entry);
-        g_free(event);
-    }
+    nvme_aer_free_events(&n->base);
+    n->base.aer.outstanding = 0;
 
     if (n->params.sriov_max_vfs) {
         if (!pci_is_vf(pci_dev)) {
@@ -6677,9 +6587,6 @@ static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst)
         }
     }
 
-    n->base.aer_queued = 0;
-    n->base.aer_mask = 0;
-    n->base.outstanding_aers = 0;
     n->base.qs_created = false;
 
     n->base.dn = n->params.atomic_dn; /* Set Disable Normal */
@@ -7210,10 +7117,10 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
              * However, it seems reasonable to use it here in a similar
              * fashion.
              */
-            if (n->base.outstanding_aers) {
-                nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
-                                   NVME_AER_INFO_ERR_INVALID_DB_REGISTER,
-                                   NVME_LOG_ERROR_INFO);
+            if (n->base.aer.outstanding) {
+                nvme_aer_enqueue(&n->base, NVME_AER_TYPE_ERROR,
+                                 NVME_AER_INFO_ERR_INVALID_DB_REGISTER,
+                                 NVME_LOG_ERROR_INFO);
             }
 
             return;
@@ -7226,10 +7133,10 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
                            " (cqid %"PRIu32" old %"PRIu16" new %"PRIu16")",
                            qid, cq->head, new_head);
 
-            if (n->base.outstanding_aers) {
-                nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
-                                   NVME_AER_INFO_ERR_INVALID_DB_VALUE,
-                                   NVME_LOG_ERROR_INFO);
+            if (n->base.aer.outstanding) {
+                nvme_aer_enqueue(&n->base, NVME_AER_TYPE_ERROR,
+                                 NVME_AER_INFO_ERR_INVALID_DB_VALUE,
+                                 NVME_LOG_ERROR_INFO);
             }
 
             return;
@@ -7267,10 +7174,10 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
                            " for nonexistent queue,"
                            " sqid=%"PRIu32", ignoring", qid);
 
-            if (n->base.outstanding_aers) {
-                nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
-                                   NVME_AER_INFO_ERR_INVALID_DB_REGISTER,
-                                   NVME_LOG_ERROR_INFO);
+            if (n->base.aer.outstanding) {
+                nvme_aer_enqueue(&n->base, NVME_AER_TYPE_ERROR,
+                                 NVME_AER_INFO_ERR_INVALID_DB_REGISTER,
+                                 NVME_LOG_ERROR_INFO);
             }
 
             return;
@@ -7283,10 +7190,10 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
                            " (sqid %"PRIu32" old %"PRIu16" new %"PRIu16")",
                            qid, sq->tail, new_tail);
 
-            if (n->base.outstanding_aers) {
-                nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
-                                   NVME_AER_INFO_ERR_INVALID_DB_VALUE,
-                                   NVME_LOG_ERROR_INFO);
+            if (n->base.aer.outstanding) {
+                nvme_aer_enqueue(&n->base, NVME_AER_TYPE_ERROR,
+                                 NVME_AER_INFO_ERR_INVALID_DB_VALUE,
+                                 NVME_LOG_ERROR_INFO);
             }
 
             return;
@@ -7546,8 +7453,9 @@ static void nvme_init_state(NvmeCtrl *n)
     n->base.temperature = NVME_TEMPERATURE;
     n->base.features.temp_thresh_hi = NVME_TEMPERATURE_WARNING;
     n->base.starttime_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
-    n->base.aer_reqs = g_new0(NvmeRequest *, n->base.params.aerl + 1);
-    QTAILQ_INIT(&n->base.aer_queue);
+    n->base.aer.reqs = g_new0(NvmeRequest *, n->base.params.aerl + 1);
+    n->base.aer.queued_max = n->params.aer_max_queued;
+    QTAILQ_INIT(&n->base.aer.queue);
 
     n->nr_sec_ctrls = max_vfs;
     for (i = 0; i < max_vfs; i++) {
@@ -8363,7 +8271,7 @@ static void nvme_exit(PCIDevice *pci_dev)
 
     g_free(n->base.cq);
     g_free(n->base.sq);
-    g_free(n->base.aer_reqs);
+    g_free(n->base.aer.reqs);
 
 
     /* Only one of the `spdm_socket`s below should have been setup */
@@ -8870,18 +8778,18 @@ static bool nvme_ctrl_pre_save(void *opaque, Error **errp)
      * QEMU NVMe changes, we may break migration without noticing it, or worse,
      * introduce silent data corruption during migration.
      */
-    if (n->base.aer_queued) {
+    if (n->base.aer.queued) {
         NvmeAsyncEvent *event;
 
-        QTAILQ_FOREACH(event, &n->base.aer_queue, entry) {
+        QTAILQ_FOREACH(event, &n->base.aer.queue, entry) {
             trace_pci_nvme_pre_save_aer(event->result.event_type,
                                         event->result.event_info,
                                         event->result.log_page);
         }
     }
 
-    for (i = 0; i < n->base.outstanding_aers; i++) {
-        NvmeRequest *req = n->base.aer_reqs[i];
+    for (i = 0; i < n->base.aer.outstanding; i++) {
+        NvmeRequest *req = n->base.aer.reqs[i];
 
         if (!pre_save_validate_aer_req(req, errp)) {
             return false;
@@ -9072,19 +8980,19 @@ static bool nvme_ctrl_post_load(void *opaque, int version_id, Error **errp)
         qemu_bh_schedule(cq->bh);
     }
 
-    if (n->base.aer_queued) {
+    if (n->base.aer.queued) {
         NvmeAsyncEvent *event;
 
-        QTAILQ_FOREACH(event, &n->base.aer_queue, entry) {
+        QTAILQ_FOREACH(event, &n->base.aer.queue, entry) {
             trace_pci_nvme_post_load_aer(event->result.event_type,
                                          event->result.event_info,
                                          event->result.log_page);
         }
     }
 
-    for (i = 0; i < n->base.outstanding_aers; i++) {
+    for (i = 0; i < n->base.aer.outstanding; i++) {
         NvmeSQueue *sq = &n->base.admin_sq;
-        NvmeRequest *req_from = n->base.aer_reqs[i];
+        NvmeRequest *req_from = n->base.aer.reqs[i];
         NvmeRequest *req;
 
         /* Idea here is the same as for "restore cq->req_list-s" step */
@@ -9100,7 +9008,7 @@ static bool nvme_ctrl_post_load(void *opaque, int version_id, Error **errp)
         memcpy(&req->cqe, &req_from->cqe, sizeof(NvmeCqe));
         memcpy(&req->cmd, &req_from->cmd, sizeof(NvmeCmd));
 
-        n->base.aer_reqs[i] = req;
+        n->base.aer.reqs[i] = req;
         g_free(req_from);
     }
 
@@ -9165,7 +9073,7 @@ static const VMStateDescription nvme_vmstate = {
         VMSTATE_UINT16(base.page_bits, NvmeCtrl),
         VMSTATE_UINT16(base.max_prp_ents, NvmeCtrl),
         VMSTATE_UINT32(base.max_q_ents, NvmeCtrl),
-        VMSTATE_UINT8(base.outstanding_aers, NvmeCtrl),
+        VMSTATE_UINT8(base.aer.outstanding, NvmeCtrl),
         VMSTATE_INT32(base.irq.intx.pending, NvmeCtrl),
 
         VMSTATE_UINT64(host_timestamp, NvmeCtrl),
@@ -9180,13 +9088,13 @@ static const VMStateDescription nvme_vmstate = {
         VMSTATE_UINT64(base.dbbuf_eis, NvmeCtrl),
         VMSTATE_BOOL(base.dbbuf_enabled, NvmeCtrl),
 
-        VMSTATE_UINT8(base.aer_mask, NvmeCtrl),
+        VMSTATE_UINT8(base.aer.mask, NvmeCtrl),
         VMSTATE_VARRAY_OF_POINTER_TO_STRUCT_UINT8_ALLOC(
-            base.aer_reqs, NvmeCtrl, base.outstanding_aers, 0,
+            base.aer.reqs, NvmeCtrl, base.aer.outstanding, 0,
             nvme_vmstate_request, NvmeRequest),
-        VMSTATE_QTAILQ_V(base.aer_queue, NvmeCtrl, 1, nvme_vmstate_async_event,
+        VMSTATE_QTAILQ_V(base.aer.queue, NvmeCtrl, 1, nvme_vmstate_async_event,
                          NvmeAsyncEvent, entry),
-        VMSTATE_INT32(base.aer_queued, NvmeCtrl),
+        VMSTATE_INT32(base.aer.queued, NvmeCtrl),
 
         VMSTATE_STRUCT(namespace, NvmeCtrl, 0, nvme_vmstate_ns, NvmeNamespace),
 
@@ -9220,8 +9128,6 @@ static void nvme_class_init(ObjectClass *oc, const void *data)
 
     /* the test device submission admission (atomic write batching) */
     bc->sq_admit = nvme_sq_admit;
-
-    bc->process_aers = nvme_process_aers;
 
     /* the test device bounces non-mappable data pointers (vnvme
      * rejects them with a Data Transfer Error) */
@@ -9290,9 +9196,9 @@ static void nvme_ns_hot_plug(const HotplugHandler *hotplug_dev,
             nvme_update_dsm_limits(ctrl, ns);
 
             if (!test_and_set_bit(nsid, ctrl->changed_nsids)) {
-                nvme_enqueue_event(ctrl, NVME_AER_TYPE_NOTICE,
-                                   NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED,
-                                   NVME_LOG_CHANGED_NSLIST);
+                nvme_aer_enqueue(&ctrl->base, NVME_AER_TYPE_NOTICE,
+                                 NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED,
+                                 NVME_LOG_CHANGED_NSLIST);
             }
         }
     }
@@ -9327,9 +9233,9 @@ static void nvme_ns_hot_unplug(const HotplugHandler *hotplug_dev,
         nvme_update_dsm_limits(ctrl, NULL);
 
         if (!test_and_set_bit(nsid, ctrl->changed_nsids)) {
-            nvme_enqueue_event(ctrl, NVME_AER_TYPE_NOTICE,
-                               NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED,
-                               NVME_LOG_CHANGED_NSLIST);
+            nvme_aer_enqueue(&ctrl->base, NVME_AER_TYPE_NOTICE,
+                             NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED,
+                             NVME_LOG_CHANGED_NSLIST);
         }
     }
 

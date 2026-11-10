@@ -3,7 +3,7 @@
 # delivery (irq.c) and the generic admin command semantics installed as
 # base-class defaults (admin.c). In the security boundary. Built when
 # either device is enabled.
-core_files = files('core/base.c', 'core/dptr.c', 'core/dma.c', 'core/queue.c', 'core/irq.c', 'core/admin.c', 'core/ns.c')
+core_files = files('core/base.c', 'core/dptr.c', 'core/dma.c', 'core/queue.c', 'core/irq.c', 'core/admin.c', 'core/ns.c', 'core/aer.c')
 system_ss.add(when: 'CONFIG_NVME_PCI', if_true: core_files)
 system_ss.add(when: 'CONFIG_VNVME_PCI', if_true: core_files)
 

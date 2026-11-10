@@ -72,12 +72,18 @@
 #define VNVME_SHN_ABRUPT            0x2
 
 /*
- * Asynchronous Event Request Limit. Fixed, not a property: vnvme never
- * queues asynchronous events (NvmeBaseClass.process_aers stays NULL),
- * so this only feeds the identify value and the size of the AER parking
- * array.
+ * Asynchronous Event Request Limit. Fixed, not a property: vnvme queues
+ * only SMART/Health events (the temperature threshold), so this feeds the
+ * identify value and bounds the AER parking array.
  */
 #define VNVME_AERL         3
+
+/*
+ * Event type is a 3-bit field, so 8 is one event per possible type. vnvme
+ * only raises SMART/Health temperature events; the type mask suppresses
+ * repeats after delivery.
+ */
+#define VNVME_AER_MAX_QUEUED 8
 
 /*
  * Maximum Data Transfer Size, in units of the emulated memory page size
@@ -579,6 +585,28 @@ static uint16_t vnvme_identify(VnvmeCtrl *n, NvmeRequest *req)
     }
 }
 
+/* --- Asynchronous events (SMART / Health) --- */
+
+
+static void vnvme_aer_smart_event(NvmeCtrlBase *n, uint8_t event)
+{
+    uint8_t aer_info;
+
+    if (!(NVME_AEC_SMART(n->features.async_config) & event)) {
+        return;
+    }
+
+    switch (event) {
+    case NVME_SMART_TEMPERATURE:
+        aer_info = NVME_AER_INFO_SMART_TEMP_THRESH;
+        break;
+    default:
+        return;
+    }
+
+    nvme_aer_enqueue(n, NVME_AER_TYPE_SMART, aer_info, NVME_LOG_SMART_INFO);
+}
+
 /* --- Get / Set Features --- */
 
 static uint16_t vnvme_get_feature(VnvmeCtrl *n, NvmeRequest *req)
@@ -669,10 +697,29 @@ static uint16_t vnvme_set_feature(VnvmeCtrl *n, NvmeRequest *req)
         break;
     case NVME_TEMPERATURE_THRESHOLD:
         if (NVME_TEMP_TMPSEL(dw11) == NVME_TEMP_TMPSEL_COMPOSITE) {
-            if (NVME_TEMP_THSEL(dw11) == NVME_TEMP_THSEL_OVER) {
+            bool was_warning =
+                n->smart_critical_warning & NVME_SMART_TEMPERATURE;
+
+            switch (NVME_TEMP_THSEL(dw11)) {
+            case NVME_TEMP_THSEL_OVER:
                 n->features.temp_thresh_hi = dw11 & 0xffff;
-            } else {
+                break;
+            case NVME_TEMP_THSEL_UNDER:
                 n->features.temp_thresh_low = dw11 & 0xffff;
+                break;
+            default:
+                return NVME_INVALID_FIELD | NVME_DNR;
+            }
+
+            if ((n->temperature >= n->features.temp_thresh_hi) ||
+                (n->temperature <= n->features.temp_thresh_low)) {
+                n->smart_critical_warning |= NVME_SMART_TEMPERATURE;
+                /* coalescing identical events is permitted */
+                if (!was_warning) {
+                    vnvme_aer_smart_event(n, NVME_SMART_TEMPERATURE);
+                }
+            } else {
+                n->smart_critical_warning &= ~NVME_SMART_TEMPERATURE;
             }
         }
         break;
@@ -690,8 +737,8 @@ static uint16_t vnvme_set_feature(VnvmeCtrl *n, NvmeRequest *req)
 
 /* --- Get Log Page --- */
 
-static uint16_t vnvme_smart_info(VnvmeCtrl *n, uint32_t len, uint64_t off,
-                                  NvmeRequest *req)
+static uint16_t vnvme_smart_info(VnvmeCtrl *n, uint8_t rae, uint32_t len,
+                                 uint64_t off, NvmeRequest *req)
 {
     NvmeSmartLog smart = {};
 
@@ -720,9 +767,16 @@ static uint16_t vnvme_smart_info(VnvmeCtrl *n, uint32_t len, uint64_t off,
             cpu_to_le64(stats->nr_ops[BLOCK_ACCT_WRITE]);
     }
 
+    uint16_t status;
     uint32_t trans_len = MIN(buf_len, len);
 
-    return nvme_c2h(n, (uint8_t *)&smart + off, trans_len, len, req);
+    status = nvme_c2h(n, (uint8_t *)&smart + off, trans_len, len, req);
+
+    if (status == NVME_SUCCESS && !rae) {
+        nvme_aer_clear_event(n, NVME_AER_TYPE_SMART);
+    }
+
+    return status;
 }
 
 static uint16_t vnvme_error_info(VnvmeCtrl *n, uint32_t len, uint64_t off,
@@ -765,18 +819,19 @@ static uint16_t vnvme_get_log(VnvmeCtrl *n, NvmeRequest *req)
     uint32_t dw11 = le32_to_cpu(req->cmd.cdw11);
     uint32_t dw12 = le32_to_cpu(req->cmd.cdw12);
     uint8_t lid = dw10 & 0xff;
-    uint8_t rae = (dw10 >> 8) & 0xf;
+    uint8_t lsp = (dw10 >> 8) & 0xf;
+    uint8_t rae = (dw10 >> 15) & 0x1;
     uint32_t len = ((dw10 >> 16) | ((uint32_t)dw11 << 16)) + 1;
     uint64_t off = ((uint64_t)dw12 |
                     ((uint64_t)le32_to_cpu(req->cmd.cdw13) << 32));
 
-    trace_pci_nvme_get_log(nvme_cid(req), lid, 0, rae, len, off);
+    trace_pci_nvme_get_log(nvme_cid(req), lid, lsp, rae, len, off);
 
     switch (lid) {
     case NVME_LOG_ERROR_INFO:
         return vnvme_error_info(n, len, off, req);
     case NVME_LOG_SMART_INFO:
-        return vnvme_smart_info(n, len, off, req);
+        return vnvme_smart_info(n, rae, len, off, req);
     case NVME_LOG_FW_SLOT_INFO:
         return vnvme_fw_log_info(n, len, off, req);
     default:
@@ -1030,7 +1085,8 @@ static void vnvme_disable_ctrl(VnvmeCtrl *n)
     n->admin_sq.dma_addr = n->admin_cq.dma_addr = 0;
     n->admin_sq.size = n->admin_cq.size = 0;
     n->qs_created = false;
-    n->outstanding_aers = 0;
+    nvme_aer_free_events(n);
+    n->aer.outstanding = 0;
     vnvme_reset_features(n);
     n->sq[0] = NULL;
     n->cq[0] = NULL;
@@ -1381,8 +1437,11 @@ static void vnvme_init_state(VnvmeCtrl *n)
     n->temperature = VNVME_TEMPERATURE;
     vnvme_reset_features(n);
     n->starttime_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
-    n->aer_reqs = g_new0(NvmeRequest *, n->params.aerl + 1);
-    QTAILQ_INIT(&n->aer_queue);
+    n->aer.reqs = g_new0(NvmeRequest *, n->params.aerl + 1);
+    QTAILQ_INIT(&n->aer.queue);
+    n->aer.queued = 0;
+    n->aer.queued_max = VNVME_AER_MAX_QUEUED;
+    n->aer.mask = 0;
 
     n->spdm_socket = -1;
 
@@ -1484,12 +1543,13 @@ static void vnvme_exit(PCIDevice *pci_dev)
     VnvmeCtrl *n = VNVME(pci_dev);
 
     vnvme_reset(n);
+    nvme_aer_free_events(n);
 
     nvme_irq_cleanup_notifiers(n);
 
     g_free(n->sq);
     g_free(n->cq);
-    g_free(n->aer_reqs);
+    g_free(n->aer.reqs);
     g_free(n->admin_sq.io_req);
 
     migrate_del_blocker(&n->migration_blocker);
